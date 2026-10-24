@@ -79,6 +79,7 @@
     <input type="text" id="termInput" placeholder="terme à surveiller…" />
     <label>distance <input type="number" id="distInput" min="0" max="4" value="0" /></label>
     <button id="addBtn">+ Colonne</button>
+    <div id="freshness" style="color:#8b98a5;font-size:12px;">aucun message reçu</div>
     <div id="status">connexion…</div>
   </div>
   <div id="blacklistBar">
@@ -234,13 +235,29 @@ function dispatchEvent(ev) {
   });
 }
 
-// --- connexion aux relais ---
-let openCount = 0;
-RELAYS.forEach((url) => {
+// --- connexion aux relais, avec reconnexion auto (un relais peut tomber/rate-limiter) ---
+const relayState = {}; // url -> { ws, open }
+let lastMessageAt = null;
+
+function updateStatus() {
+  const openCount = Object.values(relayState).filter((r) => r.open).length;
+  document.getElementById("status").textContent = `${openCount}/${RELAYS.length} relais connectés`;
+}
+
+function updateFreshness() {
+  const el = document.getElementById("freshness");
+  el.textContent = lastMessageAt
+    ? `dernier message il y a ${Math.round((Date.now() - lastMessageAt) / 1000)}s`
+    : "aucun message reçu";
+}
+setInterval(updateFreshness, 1000);
+
+function connectRelay(url) {
   const ws = new WebSocket(url);
+  relayState[url] = { ws, open: false };
   ws.onopen = () => {
-    openCount++;
-    document.getElementById("status").textContent = `${openCount}/${RELAYS.length} relais connectés`;
+    relayState[url].open = true;
+    updateStatus();
     ws.send(JSON.stringify(["REQ", "dash", { kinds: [20000] }]));
   };
   ws.onmessage = (e) => {
@@ -248,6 +265,7 @@ RELAYS.forEach((url) => {
     try { msg = JSON.parse(e.data); } catch { return; }
     if (msg[0] !== "EVENT") return;
     const ev = msg[2];
+    lastMessageAt = Date.now();
     if (seenEventIds.has(ev.id)) return;
     seenEventIds.add(ev.id);
     recentEvents.push(ev);
@@ -259,8 +277,18 @@ RELAYS.forEach((url) => {
     }
     dispatchEvent(ev);
   };
-  ws.onclose = () => { openCount--; document.getElementById("status").textContent = `${openCount}/${RELAYS.length} relais connectés`; };
-});
+  ws.onclose = () => { relayState[url].open = false; updateStatus(); };
+  ws.onerror = () => { relayState[url].open = false; updateStatus(); };
+}
+
+RELAYS.forEach(connectRelay);
+
+// toutes les 30s : relance les relais qui ne sont plus ouverts (fermés ou jamais connectés)
+setInterval(() => {
+  RELAYS.forEach((url) => {
+    if (relayState[url]?.ws.readyState !== WebSocket.OPEN) connectRelay(url);
+  });
+}, 30000);
 
 document.getElementById("addBtn").onclick = () => {
   const term = document.getElementById("termInput").value;
