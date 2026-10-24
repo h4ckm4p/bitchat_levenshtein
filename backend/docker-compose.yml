@@ -12,7 +12,7 @@ services:
       - ./data:/app/data
     environment:
       - PORT=8787
-      - ALLOWED_ORIGINS=https://h4ckm4p.github.io,http://localhost,http://127.0.0.1
+      - ALLOWED_ORIGINS=http://localhost,http://127.0.0.1
       # Pour faire sortir les connexions aux relais via Tor (anonymat, comme bitchat
       # lui-même selon son whitepaper) : installe/lance Tor sur ta machine (port SOCKS
       # 9050 par défaut), puis décommente la ligne suivante.
@@ -23,10 +23,9 @@ services:
     container_name: bitchat-web
     restart: unless-stopped
     working_dir: /site
-    # on ne monte QUE les 3 pages, pas tout le dossier backend/ (qui contient la base
+    # on ne monte QUE les 2 pages, pas tout le dossier backend/ (qui contient la base
     # SQLite) -- même en local-only, pas de raison de la rendre servable en statique.
     volumes:
-      - ../index.html:/site/index.html:ro
       - ../local.html:/site/local.html:ro
       - ../channel.html:/site/channel.html:ro
     ports:

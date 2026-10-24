@@ -64,7 +64,7 @@ const HOST = process.env.HOST || "0.0.0.0";
 const DB_PATH = process.env.DB_PATH || "./data/bitchat.db";
 const TOR_PROXY = process.env.TOR_PROXY || ""; // ex: socks5h://127.0.0.1:9050
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
-  "https://h4ckm4p.github.io,http://localhost,http://127.0.0.1"
+  "http://localhost,http://127.0.0.1"
 ).split(",").map((s) => s.trim());
 const RETENTION_DAYS = Number(process.env.RETENTION_DAYS) || 30;
 
@@ -191,8 +191,8 @@ backfillLocations();
 reclassifyDuplicateSpam();
 setInterval(reclassifyDuplicateSpam, 10 * 60 * 1000); // un flood en cours doit être nettoyé vite, pas au prochain redémarrage
 
-// distance de Levenshtein + matches() : identiques à celles du dashboard (index.html/
-// local.html), dupliquées ici pour filtrer l'export par terme de recherche côté serveur.
+// distance de Levenshtein + matches() : identiques à celles du dashboard (local.html),
+// dupliquées ici pour filtrer l'export par terme de recherche côté serveur.
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
   if (m === 0) return n;
@@ -209,8 +209,8 @@ function levenshtein(a, b) {
   }
   return prev[n];
 }
-// syntaxe de recherche, cohérente avec le dashboard (index.html/local.html) : virgule =
-// OU, "+" = ET -- ex: "manif+paris, bastille" matche (manif ET paris) OU bastille.
+// syntaxe de recherche, cohérente avec le dashboard (local.html) : virgule = OU, "+" = ET
+// -- ex: "manif+paris, bastille" matche (manif ET paris) OU bastille.
 function parseQuery(term) {
   return term.split(",")
     .map((group) => group.split("+").map((s) => s.trim()).filter(Boolean))

@@ -15,9 +15,9 @@ docker compose up -d --build
 ```
 
 `docker compose up -d` démarre **deux** conteneurs : `bitchat-backend` (agrégation + API,
-port 8787) et `bitchat-web` (sert les pages statiques `index.html`/`local.html`/
-`channel.html`, port 8734 — ne monte que ces 3 fichiers, pas tout le dossier `backend/`
-qui contient la base SQLite).
+port 8787) et `bitchat-web` (sert les pages statiques `local.html`/`channel.html`, port
+8734 — ne monte que ces 2 fichiers, pas tout le dossier `backend/` qui contient la base
+SQLite).
 
 Vérifier que ça tourne :
 ```bash
@@ -25,10 +25,8 @@ curl http://127.0.0.1:8787/health
 docker compose logs -f
 ```
 
-Puis ouvrir **http://localhost:8734/local.html**. C'est la même interface que le dashboard
-GitHub Pages (`index.html`), mais elle se connecte à ce backend local au lieu des relais
-directement — avec en plus l'historique au chargement. Cliquer un message ouvre
-`channel.html`, l'historique complet + le direct de ce canal.
+Puis ouvrir **http://localhost:8734/local.html**. Cliquer un message ouvre `channel.html`,
+l'historique complet + le direct de ce canal.
 
 ## Anonymat
 
@@ -48,14 +46,14 @@ directement — avec en plus l'historique au chargement. Cliquer un message ouvr
 - **Pas de compte, pas de clé** : on ne fait que *lire* les relais (`REQ`), jamais publier —
   donc aucune identité Nostr n'est créée ni exposée.
 - **Liste d'origines autorisées** : le backend refuse les requêtes dont l'en-tête `Origin` ne
-  fait pas partie de `ALLOWED_ORIGINS` (par défaut : le dashboard GitHub Pages + localhost) —
-  un site tiers ne peut pas faire parler ton backend local depuis le navigateur d'un visiteur.
+  fait pas partie de `ALLOWED_ORIGINS` (par défaut : localhost uniquement) — un site tiers ne
+  peut pas faire parler ton backend local depuis le navigateur d'un visiteur.
 
 ## Limites
 
 - Ne tourne que quand le conteneur tourne — pas un vrai "24/7" sauf si tu laisses ta machine
   allumée en continu.
-- **Après avoir modifié `index.html`/`local.html`/`channel.html`** (si tu code toi-même) :
+- **Après avoir modifié `local.html`/`channel.html`** (si tu code toi-même) :
   `docker compose restart bitchat-web`. Le montage du fichier en lecture seule peut rester
   bloqué sur une vue périmée du fichier (tronquée) après plusieurs écritures rapides sur
   macOS/Docker Desktop — observé en conditions réelles (page qui ne faisait plus rien du
@@ -73,6 +71,6 @@ directement — avec en plus l'historique au chargement. Cliquer un message ouvr
 |---|---|---|
 | `PORT` | `8787` | Port HTTP/WS du backend |
 | `DB_PATH` | `./data/bitchat.db` | Fichier SQLite (monté en volume, persiste entre redémarrages) |
-| `ALLOWED_ORIGINS` | GitHub Pages + localhost | Origines autorisées à parler au backend |
+| `ALLOWED_ORIGINS` | localhost | Origines autorisées à parler au backend |
 | `TOR_PROXY` | (vide) | Proxy SOCKS5 pour les connexions sortantes aux relais, ex `socks5h://host.docker.internal:9050` |
 | `RETENTION_DAYS` | `30` | Purge automatique (toutes les heures) des messages plus vieux que N jours |
