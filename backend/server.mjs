@@ -196,7 +196,7 @@ const server = createServer((req, res) => {
   if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
 
   if (req.url.startsWith("/api/messages")) {
-    const limit = Math.min(2000, Number(new URL(req.url, "http://x").searchParams.get("limit")) || 500);
+    const limit = Math.min(10000, Number(new URL(req.url, "http://x").searchParams.get("limit")) || 500);
     const rows = recentStmt.all(limit).map(toClientShape);
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(rows));

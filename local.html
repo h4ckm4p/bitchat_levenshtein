@@ -193,14 +193,22 @@ function renderColumns() {
   recentEvents.forEach((ev) => dispatchEvent(ev));
 }
 
-function addColumn(term, dist) {
+async function addColumn(term, dist) {
   if (!term.trim()) return;
   const col = { id: crypto.randomUUID(), term: term.trim(), dist };
   columns.push(col);
   saveColumns();
   document.getElementById("columns").appendChild(createColumnEl(col));
-  // ne peuple que la nouvelle colonne depuis le buffer récent — les autres ne sont pas touchées
-  recentEvents.forEach((ev) => { if (!isBlacklisted(ev.content ?? "")) dispatchToColumn(ev, col); });
+  // backfill depuis la base (pas juste le buffer mémoire de ~300 messages) — les autres
+  // colonnes ne sont pas touchées, seule celle-ci se peuple.
+  try {
+    const events = await fetch(`${BACKEND}/api/messages?limit=5000`).then((r) => r.json());
+    events.slice().reverse().forEach((ev) => {
+      if (!isBlacklisted(ev.content ?? "")) dispatchToColumn(ev, col);
+    });
+  } catch (e) {
+    console.error("backfill colonne impossible:", e);
+  }
 }
 
 function removeColumn(id) {
