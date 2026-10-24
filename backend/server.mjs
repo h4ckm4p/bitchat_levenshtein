@@ -209,8 +209,13 @@ function levenshtein(a, b) {
   }
   return prev[n];
 }
-// un terme peut être une combinaison "manif, manifestation, manifestants" -- cohérent
-// avec le même mécanisme côté dashboard (index.html/local.html).
+// syntaxe de recherche, cohérente avec le dashboard (index.html/local.html) : virgule =
+// OU, "+" = ET -- ex: "manif+paris, bastille" matche (manif ET paris) OU bastille.
+function parseQuery(term) {
+  return term.split(",")
+    .map((group) => group.split("+").map((s) => s.trim()).filter(Boolean))
+    .filter((group) => group.length > 0);
+}
 function matchesOne(content, term, dist) {
   const text = (content || "").toLowerCase();
   const t = term.toLowerCase();
@@ -219,7 +224,7 @@ function matchesOne(content, term, dist) {
   return words.some((w) => levenshtein(w, t) <= dist);
 }
 function matches(content, term, dist) {
-  return term.split(",").map((s) => s.trim()).filter(Boolean).some((t) => matchesOne(content, t, dist));
+  return parseQuery(term).some((group) => group.every((t) => matchesOne(content, t, dist)));
 }
 
 function tagValue(ev, name) {

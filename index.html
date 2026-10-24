@@ -12,7 +12,7 @@
   }
   #toolbar {
     display: flex; gap: 8px; align-items: center; padding: 10px 14px;
-    background: #1c1f23; border-bottom: 1px solid #2a2e33; flex-shrink: 0;
+    background: #1c1f23; border-bottom: 1px solid #2a2e33; flex-shrink: 0; flex-wrap: wrap;
   }
   #toolbar input[type=text] {
     background: #0f1113; border: 1px solid #2a2e33; color: #e7e9ea;
@@ -27,6 +27,12 @@
     border-radius: 6px; cursor: pointer; font-weight: 600;
   }
   #toolbar label { color: #8b98a5; font-size: 12px; }
+  .qbuilder { display: flex; gap: 4px; align-items: center; }
+  .qbuilder input[type=text] { width: 100px !important; }
+  .qbuilder select {
+    background: #0f1113; border: 1px solid #2a2e33; color: #8b98a5;
+    padding: 6px 4px; border-radius: 6px; font-size: 12px;
+  }
   #status { margin-left: auto; color: #8b98a5; font-size: 12px; }
   #blacklistBar {
     display: flex; gap: 8px; align-items: center; padding: 8px 14px;
@@ -79,14 +85,24 @@
 </head>
 <body>
   <div id="toolbar">
-    <input type="text" id="termInput" placeholder="terme(s), ex: manif, manifestation" />
+    <div class="qbuilder">
+      <input type="text" id="term1" placeholder="terme 1" />
+      <input type="text" id="term2" placeholder="terme 2" />
+      <input type="text" id="term3" placeholder="terme 3" />
+      <select id="termOp"><option value="+">ET</option><option value=",">OU</option></select>
+    </div>
     <label>distance <input type="number" id="distInput" min="0" max="4" value="0" /></label>
     <button id="addBtn">+ Colonne</button>
     <div id="freshness" style="color:#8b98a5;font-size:12px;">aucun message reçu</div>
     <div id="status">connexion…</div>
   </div>
   <div id="blacklistBar">
-    <input type="text" id="blTermInput" placeholder="terme à bloquer (spam, troll…)" />
+    <div class="qbuilder">
+      <input type="text" id="bl1" placeholder="terme à bloquer 1" />
+      <input type="text" id="bl2" placeholder="terme 2" />
+      <input type="text" id="bl3" placeholder="terme 3" />
+      <select id="blOp"><option value="+">ET</option><option value=",">OU</option></select>
+    </div>
     <label>distance <input type="number" id="blDistInput" min="0" max="4" value="0" /></label>
     <button id="blAddBtn">+ Liste noire</button>
     <div id="blChips"></div>
@@ -121,10 +137,13 @@ function levenshtein(a, b) {
   return prev[n];
 }
 
-// un terme peut être une combinaison "manif, manifestation, manifestants" -- chaque
-// alternative, séparée par une virgule, est évaluée indépendamment et combinée en OU.
-function splitTerms(term) {
-  return term.split(",").map((s) => s.trim()).filter(Boolean);
+// syntaxe de recherche : virgule = OU, "+" = ET (priorité standard, le ET se calcule
+// dans chaque groupe avant le OU entre groupes) -- ex: "manif+paris, bastille" matche
+// (manif ET paris) OU bastille. Un terme simple sans opérateur se comporte comme avant.
+function parseQuery(term) {
+  return term.split(",")
+    .map((group) => group.split("+").map((s) => s.trim()).filter(Boolean))
+    .filter((group) => group.length > 0);
 }
 
 // shortcut: distance absolue, pas relative à la longueur du mot — au-delà de 2
@@ -138,7 +157,7 @@ function matchesOne(content, term, dist) {
 }
 
 function matches(content, term, dist) {
-  return splitTerms(term).some((t) => matchesOne(content, t, dist));
+  return parseQuery(term).some((group) => group.every((t) => matchesOne(content, t, dist)));
 }
 
 // retrouve la position exacte du mot qui a fait matcher la colonne (+ sa distance réelle,
@@ -164,13 +183,20 @@ function findHighlightOne(content, term, dist) {
   return best;
 }
 
+// surligne un terme du premier groupe ET qui matche intégralement (pas juste "le
+// meilleur terme isolé" -- sinon on pourrait surligner un mot d'un groupe ET dont les
+// autres termes ne sont pas présents dans ce message).
 function findHighlight(content, term, dist) {
-  let best = null;
-  for (const t of splitTerms(term)) {
-    const hl = findHighlightOne(content, t, dist);
-    if (hl && (!best || hl.distance < best.distance)) best = hl;
+  for (const group of parseQuery(term)) {
+    if (!group.every((t) => matchesOne(content, t, dist))) continue;
+    let best = null;
+    for (const t of group) {
+      const hl = findHighlightOne(content, t, dist);
+      if (hl && (!best || hl.distance < best.distance)) best = hl;
+    }
+    if (best) return best;
   }
-  return best;
+  return null;
 }
 
 // couleur de surbrillance par palier de distance : exact (bleu) -> de plus en plus
@@ -471,24 +497,40 @@ function connectRelay(url) {
 
 RELAYS.forEach(connectRelay);
 
+// lit jusqu'à 3 champs de terme + un sélecteur ET/OU, construit la query texte
+// ("a+b" ou "a,b") que matches()/parseQuery() comprennent déjà -- évite d'exposer la
+// syntaxe brute à l'utilisateur tout en gardant le même moteur de correspondance.
+function buildQuery(ids, opId) {
+  const op = document.getElementById(opId).value;
+  const terms = ids.map((id) => document.getElementById(id).value.trim()).filter(Boolean);
+  return terms.join(op);
+}
+function clearQueryInputs(ids) {
+  ids.forEach((id) => { document.getElementById(id).value = ""; });
+}
+
 document.getElementById("addBtn").onclick = () => {
-  const term = document.getElementById("termInput").value;
+  const term = buildQuery(["term1", "term2", "term3"], "termOp");
   const dist = +document.getElementById("distInput").value || 0;
   addColumn(term, dist);
-  document.getElementById("termInput").value = "";
+  clearQueryInputs(["term1", "term2", "term3"]);
 };
-document.getElementById("termInput").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") document.getElementById("addBtn").click();
+["term1", "term2", "term3"].forEach((id) => {
+  document.getElementById(id).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("addBtn").click();
+  });
 });
 
 document.getElementById("blAddBtn").onclick = () => {
-  const term = document.getElementById("blTermInput").value;
+  const term = buildQuery(["bl1", "bl2", "bl3"], "blOp");
   const dist = +document.getElementById("blDistInput").value || 0;
   addBlacklistTerm(term, dist);
-  document.getElementById("blTermInput").value = "";
+  clearQueryInputs(["bl1", "bl2", "bl3"]);
 };
-document.getElementById("blTermInput").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") document.getElementById("blAddBtn").click();
+["bl1", "bl2", "bl3"].forEach((id) => {
+  document.getElementById(id).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("blAddBtn").click();
+  });
 });
 
 renderColumns();
