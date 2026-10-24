@@ -4,8 +4,13 @@
 // WebSocket. Pensé pour tourner en local (Docker) — pas exposé publiquement.
 import { WebSocket, WebSocketServer } from "ws";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { SocksProxyAgent } from "socks-proxy-agent";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PORT = process.env.PORT || 8787;
 // À l'intérieur du conteneur on écoute sur toutes les interfaces (sinon Docker ne peut
@@ -18,21 +23,12 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   "https://h4ckm4p.github.io,http://localhost,http://127.0.0.1"
 ).split(",").map((s) => s.trim());
 
-// relais retenus dans l'annuaire officiel bitchat (permissionlesstech/georelays) :
-// relay.damus.io en est volontairement absent (probablement écarté pour son rate-limiting
+// annuaire officiel bitchat (permissionlesstech/georelays, nostr_relays.csv), dédupliqué
+// (host vs host:443 — cf. georelays issue #14) — snapshot figé dans relays.json, voir
+// backend/README.md pour la date et comment le rafraîchir. relay.damus.io en est
+// volontairement absent de l'annuaire (probablement écarté pour son rate-limiting
 // agressif envers les clients génériques — exactement ce qu'on a subi en direct).
-const RELAYS = [
-  "wss://nos.lol",
-  "wss://relay.primal.net",
-  "wss://offchain.pub",
-  "wss://nostr.mom",
-  "wss://nostr.oxtr.dev",
-  "wss://relay.snort.social",
-  "wss://nostr-pub.wellorder.net",
-  "wss://purplerelay.com",
-  "wss://nostr.bitcoiner.social",
-  "wss://ec1.f7z.io",
-];
+const RELAYS = JSON.parse(readFileSync(join(__dirname, "relays.json"), "utf8"));
 
 const RELAY_HEADERS = { "User-Agent": "Mozilla/5.0", Origin: "https://bitchat-world-view.vercel.app" };
 
@@ -156,7 +152,9 @@ function connectRelay(url) {
   });
 }
 
-RELAYS.forEach(connectRelay);
+// shortcut: étalé sur ~50ms/relais plutôt que tout en même temps — avec 300+ relais,
+// ouvrir toutes les connexions à la même milliseconde ressemble à un scan automatisé.
+RELAYS.forEach((url, i) => setTimeout(() => connectRelay(url), i * 50));
 
 // --- serveur HTTP (backfill) + WebSocket (live), lié à 127.0.0.1 uniquement ---
 function originAllowed(origin) {
