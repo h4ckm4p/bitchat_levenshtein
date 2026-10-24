@@ -323,10 +323,14 @@ function createColumnEl(col) {
 // grossit, alors même qu'il existe en base (bug observé en conditions réelles).
 async function backfillColumn(col) {
   try {
+    // shortcut: /api/search renvoie déjà du plus ancien au plus récent (ASC) -- PAS de
+    // reverse() ici. Chaque dispatchToColumn fait un prepend ; traiter dans l'ordre ASC
+    // garantit que le dernier traité (le plus récent) reste tout en haut. Un reverse()
+    // en trop inversait tout l'affichage (bug observé : plus ancien en haut).
     const events = await fetch(
       `${BACKEND}/api/search?term=${encodeURIComponent(col.term)}&dist=${col.dist}&limit=2000`
     ).then((r) => r.json());
-    events.slice().reverse().forEach((ev) => {
+    events.forEach((ev) => {
       if (!isBlacklisted(ev.content ?? "")) dispatchToColumn(ev, col);
     });
   } catch (e) {
@@ -402,7 +406,10 @@ function dispatchToColumn(ev, col) {
   if (!body) return;
   const empty = body.querySelector(".empty");
   if (empty) empty.remove();
-  const time = new Date(ev.created_at * 1000).toLocaleTimeString();
+  // received_at (horodatage serveur), pas created_at (déclaré par l'auteur -- non
+  // fiable : fuseau horaire ou horloge locale mal réglée côté client bitchat peuvent
+  // faire apparaître un message avant des messages en réalité plus anciens).
+  const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleTimeString();
   const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const geohash = tag(ev, "g") || "?";
 
@@ -411,7 +418,7 @@ function dispatchToColumn(ev, col) {
   const div = document.createElement("div");
   div.className = "msg";
   div.title = "Cliquer pour voir tout le canal";
-  div.onclick = () => window.open(`channel.html?g=${encodeURIComponent(geohash)}&id=${encodeURIComponent(ev.id)}&ts=${ev.created_at}`, "_blank");
+  div.onclick = () => window.open(`channel.html?g=${encodeURIComponent(geohash)}&id=${encodeURIComponent(ev.id)}&ts=${ev.received_at ?? ev.created_at}`, "_blank");
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.append(`[${time}] #${geohash} `);

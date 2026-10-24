@@ -54,7 +54,8 @@ function tag(ev, name) {
 
 function renderMsg(ev, { prepend } = {}) {
   const content = ev.content ?? "";
-  const time = new Date(ev.created_at * 1000).toLocaleString();
+  // received_at (horodatage serveur), pas created_at (déclaré par l'auteur -- non fiable)
+  const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleString();
   const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const div = document.createElement("div");
   div.className = "msg";

