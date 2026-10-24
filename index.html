@@ -28,6 +28,30 @@
   }
   #toolbar label { color: #8b98a5; font-size: 12px; }
   #status { margin-left: auto; color: #8b98a5; font-size: 12px; }
+  #blacklistBar {
+    display: flex; gap: 8px; align-items: center; padding: 8px 14px;
+    background: #1c1315; border-bottom: 1px solid #2a2e33; flex-shrink: 0; flex-wrap: wrap;
+  }
+  #blacklistBar input[type=text] {
+    background: #0f1113; border: 1px solid #3a2a2c; color: #e7e9ea;
+    padding: 6px 10px; border-radius: 6px; width: 180px;
+  }
+  #blacklistBar input[type=number] {
+    background: #0f1113; border: 1px solid #3a2a2c; color: #e7e9ea;
+    padding: 6px 6px; border-radius: 6px; width: 56px;
+  }
+  #blacklistBar button {
+    background: #f4212e; border: none; color: white; padding: 7px 14px;
+    border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  #blacklistBar label { color: #8b98a5; font-size: 12px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; background: #2a1a1c;
+    border: 1px solid #3a2a2c; border-radius: 999px; padding: 4px 10px; font-size: 12px;
+  }
+  .chip .x { cursor: pointer; color: #8b98a5; }
+  .chip .x:hover { color: #f4212e; }
+  #blockedCount { color: #8b98a5; font-size: 12px; margin-left: auto; }
   #columns { flex: 1; display: flex; overflow-x: auto; }
   .col {
     width: 320px; flex-shrink: 0; border-right: 1px solid #2a2e33;
@@ -56,6 +80,13 @@
     <label>distance <input type="number" id="distInput" min="0" max="4" value="0" /></label>
     <button id="addBtn">+ Colonne</button>
     <div id="status">connexion…</div>
+  </div>
+  <div id="blacklistBar">
+    <input type="text" id="blTermInput" placeholder="terme à bloquer (spam, troll…)" />
+    <label>distance <input type="number" id="blDistInput" min="0" max="4" value="0" /></label>
+    <button id="blAddBtn">+ Liste noire</button>
+    <div id="blChips"></div>
+    <div id="blockedCount">0 messages bloqués</div>
   </div>
   <div id="columns"></div>
 
@@ -144,8 +175,46 @@ function addColumn(term, dist) {
   renderColumns();
 }
 
+// --- liste noire (spam/trolls/insultes) : un message qui matche est exclu de toutes les colonnes ---
+let blacklist = JSON.parse(localStorage.getItem("bc_blacklist") || "[]");
+let blockedCount = 0;
+
+function saveBlacklist() {
+  localStorage.setItem("bc_blacklist", JSON.stringify(blacklist));
+}
+
+function renderBlacklist() {
+  const root = document.getElementById("blChips");
+  root.innerHTML = "";
+  blacklist.forEach((b, idx) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.innerHTML = `${b.term} (dist ${b.dist}) <span class="x" data-idx="${idx}">✕</span>`;
+    root.appendChild(chip);
+  });
+  root.querySelectorAll(".x").forEach((btn) => {
+    btn.onclick = () => {
+      blacklist.splice(+btn.dataset.idx, 1);
+      saveBlacklist();
+      renderBlacklist();
+    };
+  });
+}
+
+function addBlacklistTerm(term, dist) {
+  if (!term.trim()) return;
+  blacklist.push({ term: term.trim(), dist });
+  saveBlacklist();
+  renderBlacklist();
+}
+
+function isBlacklisted(content) {
+  return blacklist.some((b) => matches(content, b.term, b.dist));
+}
+
 function dispatchEvent(ev) {
   const content = ev.content ?? "";
+  if (isBlacklisted(content)) return;
   const time = new Date(ev.created_at * 1000).toLocaleTimeString();
   const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const geohash = tag(ev, "g") || "?";
@@ -183,6 +252,11 @@ RELAYS.forEach((url) => {
     seenEventIds.add(ev.id);
     recentEvents.push(ev);
     if (recentEvents.length > 300) recentEvents.shift();
+    if (isBlacklisted(ev.content ?? "")) {
+      blockedCount++;
+      document.getElementById("blockedCount").textContent = `${blockedCount} messages bloqués`;
+      return;
+    }
     dispatchEvent(ev);
   };
   ws.onclose = () => { openCount--; document.getElementById("status").textContent = `${openCount}/${RELAYS.length} relais connectés`; };
@@ -198,7 +272,18 @@ document.getElementById("termInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") document.getElementById("addBtn").click();
 });
 
+document.getElementById("blAddBtn").onclick = () => {
+  const term = document.getElementById("blTermInput").value;
+  const dist = +document.getElementById("blDistInput").value || 0;
+  addBlacklistTerm(term, dist);
+  document.getElementById("blTermInput").value = "";
+};
+document.getElementById("blTermInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("blAddBtn").click();
+});
+
 renderColumns();
+renderBlacklist();
 </script>
 </body>
 </html>
