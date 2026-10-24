@@ -16,8 +16,18 @@ Tourne en local via Docker : un backend agrège 330 relais (annuaire officiel bi
 - **Historique interrogeable** : une colonne ajoutée cherche dans toute la base retenue, pas seulement les derniers messages.
 - **Clic sur un message** → ouvre `channel.html`, centré et surligné sur ce message, avec tout l'historique du canal autour.
 - **Export** (JSON/CSV) d'une recherche (terme + distance + ET/OU).
-- **Nettoyage anti-spam automatique** : bruit protocole, spam "zalgo", pseudos de bot générés aléatoirement, et messages identiques répétés sur un même canal par peu de comptes différents.
+- **Nettoyage anti-spam automatique** (voir détail ci-dessous).
 - **Purge automatique** après 30 jours (réglable).
+
+### Messages "bruit"
+
+Tout message qui n'est pas du vrai chat humain est stocké (rien n'est supprimé) mais masqué des colonnes, de la recherche et de l'export — un compteur `+N bruit` l'indique dans la barre du dashboard. Détecté automatiquement sur :
+
+- **Pseudos de bot générés aléatoirement** : motif `bot_` + suffixe hexadécimal (ex. `bot_faff61fc`), change à chaque message pour contourner un blocage.
+- **Messages énormes** : plus de 3000 caractères — chunks de fichiers/images encodés qui circulent sur les mêmes relais que bitchat.
+- **JSON brut** : tout message qui est du JSON valide (ex. `{"type":"handshake",...}`) — trafic protocole d'autres applications partageant les mêmes relais Nostr, pas du chat.
+- **Spam "zalgo"** : plus de 30 % de caractères Unicode combinants (accents empilés qui cassent l'affichage).
+- **Flood de doublons** : le même message répété plusieurs fois sur un même canal par peu de comptes différents (ex. une pub bitcoin postée 76 fois par 3 pseudos).
 
 ## Démarrage
 
