@@ -52,6 +52,23 @@
   .chip .x { cursor: pointer; color: #8b98a5; }
   .chip .x:hover { color: #f4212e; }
   #blockedCount { color: #8b98a5; font-size: 12px; margin-left: auto; }
+  #statsBar {
+    display: flex; gap: 8px; align-items: center; padding: 8px 14px;
+    background: #10151c; border-bottom: 1px solid #2a2e33; flex-shrink: 0; flex-wrap: wrap;
+  }
+  #statsBar input[type=text] {
+    background: #0f1113; border: 1px solid #263040; color: #e7e9ea;
+    padding: 6px 10px; border-radius: 6px; width: 140px;
+  }
+  #statsBar select {
+    background: #0f1113; border: 1px solid #263040; color: #e7e9ea;
+    padding: 6px; border-radius: 6px;
+  }
+  #statsBar button {
+    background: #2a3a4a; border: none; color: white; padding: 7px 14px;
+    border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  #storedCount { color: #8b98a5; font-size: 12px; margin-left: auto; }
   #columns { flex: 1; display: flex; overflow-x: auto; }
   .col {
     width: 320px; flex-shrink: 0; border-right: 1px solid #2a2e33;
@@ -89,6 +106,15 @@
     <button id="blAddBtn">+ Liste noire</button>
     <div id="blChips"></div>
     <div id="blockedCount">0 messages bloqués</div>
+  </div>
+  <div id="statsBar">
+    <input type="text" id="exportGeohash" placeholder="geohash du canal (ex: u09tv)" />
+    <select id="exportFormat">
+      <option value="json">JSON</option>
+      <option value="csv">CSV</option>
+    </select>
+    <button id="exportBtn">Exporter le canal</button>
+    <div id="storedCount">… messages stockés</div>
   </div>
   <div id="columns"></div>
 
@@ -261,6 +287,25 @@ function updateNodeCount() {
 }
 updateNodeCount();
 setInterval(updateNodeCount, 5000);
+
+function updateStoredCount() {
+  fetch(`${BACKEND}/api/stats`)
+    .then((r) => r.json())
+    .then(({ totalMessages, totalNoise, retentionDays }) => {
+      document.getElementById("storedCount").textContent =
+        `${totalMessages} messages stockés (+${totalNoise} bruit) — purge auto après ${retentionDays}j`;
+    })
+    .catch(() => {});
+}
+updateStoredCount();
+setInterval(updateStoredCount, 10000);
+
+document.getElementById("exportBtn").onclick = () => {
+  const geohash = document.getElementById("exportGeohash").value.trim();
+  if (!geohash) return;
+  const format = document.getElementById("exportFormat").value;
+  window.open(`${BACKEND}/api/export?geohash=${encodeURIComponent(geohash)}&format=${format}`, "_blank");
+};
 
 fetch(`${BACKEND}/api/messages?limit=500`)
   .then((r) => r.json())

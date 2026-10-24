@@ -22,6 +22,7 @@ const TOR_PROXY = process.env.TOR_PROXY || ""; // ex: socks5h://127.0.0.1:9050
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   "https://h4ckm4p.github.io,http://localhost,http://127.0.0.1"
 ).split(",").map((s) => s.trim());
+const RETENTION_DAYS = Number(process.env.RETENTION_DAYS) || 30;
 
 // annuaire officiel bitchat (permissionlesstech/georelays, nostr_relays.csv), dédupliqué
 // (host vs host:443 — cf. georelays issue #14) — snapshot figé dans relays.json, voir
@@ -57,6 +58,27 @@ const recentStmt = db.prepare(`
   SELECT id, pubkey, created_at, geohash, nickname, content FROM events
   WHERE is_noise = 0 ORDER BY created_at DESC LIMIT ?
 `);
+const countStmt = db.prepare(`SELECT COUNT(*) AS n FROM events`);
+const countNoiseStmt = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE is_noise = 1`);
+const byGeohashStmt = db.prepare(`
+  SELECT geohash, COUNT(*) AS n FROM events
+  WHERE is_noise = 0 AND geohash IS NOT NULL
+  GROUP BY geohash ORDER BY n DESC LIMIT 50
+`);
+const exportStmt = db.prepare(`
+  SELECT id, pubkey, created_at, received_at, geohash, nickname, content FROM events
+  WHERE is_noise = 0 AND geohash = ? ORDER BY created_at ASC
+`);
+const cleanupStmt = db.prepare(`DELETE FROM events WHERE received_at < ?`);
+
+// --- purge périodique : les events bitchat sont du direct, pas une archive sans fin ---
+function cleanupOldMessages() {
+  const cutoff = Math.floor(Date.now() / 1000) - RETENTION_DAYS * 86400;
+  const { changes } = cleanupStmt.run(cutoff);
+  if (changes > 0) console.log(`nettoyage : ${changes} messages de plus de ${RETENTION_DAYS}j supprimés`);
+}
+cleanupOldMessages();
+setInterval(cleanupOldMessages, 60 * 60 * 1000); // toutes les heures
 
 function tagValue(ev, name) {
   return ev.tags.find((t) => t[0] === name)?.[1];
@@ -188,6 +210,41 @@ const server = createServer((req, res) => {
     const connected = Object.values(relayOpen).filter(Boolean).length;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ relaysConnected: connected, relaysTotal: RELAYS.length }));
+    return;
+  }
+  if (req.url === "/api/stats") {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      totalMessages: countStmt.get().n,
+      totalNoise: countNoiseStmt.get().n,
+      retentionDays: RETENTION_DAYS,
+      byGeohash: byGeohashStmt.all(),
+    }));
+    return;
+  }
+  if (req.url.startsWith("/api/export")) {
+    const params = new URL(req.url, "http://x").searchParams;
+    const geohash = params.get("geohash");
+    const format = params.get("format") === "csv" ? "csv" : "json";
+    if (!geohash) {
+      res.writeHead(400).end("paramètre geohash requis");
+      return;
+    }
+    const rows = exportStmt.all(geohash);
+    const filename = `bitchat-${geohash}.${format}`;
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    if (format === "csv") {
+      res.setHeader("Content-Type", "text/csv");
+      const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const header = "id,pubkey,created_at,received_at,geohash,nickname,content\n";
+      const body = rows.map((r) =>
+        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.nickname, r.content].map(esc).join(",")
+      ).join("\n");
+      res.end(header + body);
+    } else {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(rows, null, 2));
+    }
     return;
   }
   res.writeHead(404).end();
