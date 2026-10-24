@@ -100,16 +100,17 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 `);
-// migration : ajoute "location" (lieu décodé du geohash) aux bases créées avant cette colonne
-const hasLocationCol = db.prepare(`PRAGMA table_info(events)`).all().some((c) => c.name === "location");
-if (!hasLocationCol) db.exec(`ALTER TABLE events ADD COLUMN location TEXT`);
+// migrations : colonnes ajoutées après la création initiale de la table
+const existingCols = db.prepare(`PRAGMA table_info(events)`).all().map((c) => c.name);
+if (!existingCols.includes("location")) db.exec(`ALTER TABLE events ADD COLUMN location TEXT`);
+if (!existingCols.includes("teleported")) db.exec(`ALTER TABLE events ADD COLUMN teleported INTEGER DEFAULT 0`);
 
 const insertStmt = db.prepare(`
-  INSERT OR IGNORE INTO events (id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin, location)
-  VALUES (@id, @pubkey, @created_at, @received_at, @geohash, @nickname, @content, @is_noise, @relay_origin, @location)
+  INSERT OR IGNORE INTO events (id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin, location, teleported)
+  VALUES (@id, @pubkey, @created_at, @received_at, @geohash, @nickname, @content, @is_noise, @relay_origin, @location, @teleported)
 `);
 const recentStmt = db.prepare(`
-  SELECT id, pubkey, created_at, geohash, nickname, content, location FROM events
+  SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
   WHERE is_noise = 0 ORDER BY created_at DESC LIMIT ?
 `);
 const countStmt = db.prepare(`SELECT COUNT(*) AS n FROM events`);
@@ -122,7 +123,7 @@ const byGeohashStmt = db.prepare(`
 // export : tout l'historique non-bruit, filtré ensuite en JS par terme+distance (pas en SQL,
 // la distance de Levenshtein n'a pas d'équivalent simple en SQL -- cf. matches() plus bas)
 const exportAllStmt = db.prepare(`
-  SELECT id, pubkey, created_at, received_at, geohash, location, nickname, content FROM events
+  SELECT id, pubkey, created_at, received_at, geohash, location, nickname, content, teleported FROM events
   WHERE is_noise = 0 ORDER BY created_at ASC
 `);
 const cleanupStmt = db.prepare(`DELETE FROM events WHERE received_at < ?`);
@@ -208,13 +209,15 @@ function reclassifyNoise() {
 }
 
 function toClientShape(row) {
+  const tags = [["g", row.geohash || ""], ["n", row.nickname || ""]];
+  if (row.teleported) tags.push(["t", "teleport"]); // tag officiel bitchat (cf. NostrProtocol.swift)
   return {
     id: row.id,
     pubkey: row.pubkey,
     created_at: row.created_at,
     content: row.content,
     location: row.location,
-    tags: [["g", row.geohash || ""], ["n", row.nickname || ""]],
+    tags,
   };
 }
 
@@ -265,6 +268,9 @@ function connectRelay(url) {
     const noise = isNoise(ev.content ?? "");
     const geohash = tagValue(ev, "g") || null;
     const location = describeGeohash(geohash);
+    // tag officiel bitchat ["t","teleport"] : présent quand l'auteur poste dans ce canal
+    // geohash sans y être physiquement (cf. NostrProtocol.swift / GeohashMessageHandler.kt)
+    const teleported = ev.tags.some((t) => t[0] === "t" && t[1] === "teleport");
     insertStmt.run({
       id: ev.id,
       pubkey: ev.pubkey,
@@ -276,6 +282,7 @@ function connectRelay(url) {
       is_noise: noise ? 1 : 0,
       relay_origin: url,
       location,
+      teleported: teleported ? 1 : 0,
     });
     if (!noise) broadcast({ ...ev, location });
   });
@@ -342,7 +349,7 @@ const server = createServer((req, res) => {
     if (!geohash) { res.writeHead(400).end("paramètre geohash requis"); return; }
     const limit = Math.min(2000, Number(params.get("limit")) || 500);
     const rows = db.prepare(`
-      SELECT id, pubkey, created_at, geohash, nickname, content, location FROM events
+      SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
       WHERE is_noise = 0 AND geohash = ? ORDER BY created_at DESC LIMIT ?
     `).all(geohash, limit).map(toClientShape);
     res.setHeader("Content-Type", "application/json");
@@ -367,9 +374,9 @@ const server = createServer((req, res) => {
     if (format === "csv") {
       res.setHeader("Content-Type", "text/csv");
       const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-      const header = "id,pubkey,created_at,received_at,geohash,location,nickname,content\n";
+      const header = "id,pubkey,created_at,received_at,geohash,location,teleported,nickname,content\n";
       const body = rows.map((r) =>
-        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.location, r.nickname, r.content].map(esc).join(",")
+        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.location, r.teleported ? "oui" : "non", r.nickname, r.content].map(esc).join(",")
       ).join("\n");
       res.end(header + body);
     } else {

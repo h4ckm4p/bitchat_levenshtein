@@ -92,7 +92,7 @@
   .msg .meta { color: #8b98a5; font-size: 11px; margin-bottom: 3px; }
   .msg .meta .nick { color: #1d9bf0; }
   .msg .meta .loc { color: #5b6672; }
-  .msg .content .hl { background: #1d9bf0; color: #0b0e11; border-radius: 3px; padding: 0 2px; font-weight: 700; }
+  .msg .content .hl { color: #0b0e11; border-radius: 3px; padding: 0 2px; font-weight: 700; }
   .msg .content { word-break: break-word; white-space: pre-wrap; }
   .empty { color: #5b6672; padding: 20px; text-align: center; font-size: 12px; }
 </style>
@@ -159,24 +159,34 @@ function matches(content, term, dist) {
   return words.some((w) => levenshtein(w, t) <= dist);
 }
 
-// retrouve la position exacte du mot qui a fait matcher la colonne, pour le surligner
-// dans le message affiché -- mêmes règles que matches() (sous-chaîne à distance 0,
-// mot le plus proche en Levenshtein au-delà).
+// retrouve la position exacte du mot qui a fait matcher la colonne (+ sa distance réelle,
+// pour la couleur de surbrillance) -- mêmes règles que matches() (sous-chaîne = distance 0,
+// mot le plus proche en Levenshtein au-delà). Garde le meilleur candidat, pas le premier
+// trouvé, pour refléter la correspondance la plus proche réellement présente.
 function findHighlight(content, term, dist) {
   const lower = content.toLowerCase();
   const t = term.toLowerCase();
   if (dist <= 0) {
     const idx = lower.indexOf(t);
-    return idx === -1 ? null : { start: idx, end: idx + term.length };
+    return idx === -1 ? null : { start: idx, end: idx + term.length, distance: 0 };
   }
   const re = /[\p{L}\p{N}]+/gu;
-  let m;
+  let m, best = null;
   while ((m = re.exec(content))) {
-    if (levenshtein(m[0].toLowerCase(), t) <= dist) {
-      return { start: m.index, end: m.index + m[0].length };
+    const d = levenshtein(m[0].toLowerCase(), t);
+    if (d <= dist && (!best || d < best.distance)) {
+      best = { start: m.index, end: m.index + m[0].length, distance: d };
+      if (d === 0) break;
     }
   }
-  return null;
+  return best;
+}
+
+// couleur de surbrillance par palier de distance : exact (bleu) -> de plus en plus
+// "éloigné" (jaune, orange, rouge) pour juger la confiance du match d'un coup d'œil.
+const DISTANCE_COLORS = ["#1d9bf0", "#f0b429", "#f0791d", "#f4212e"];
+function distanceColor(d) {
+  return DISTANCE_COLORS[Math.min(d, DISTANCE_COLORS.length - 1)];
 }
 
 function tag(ev, name) {
@@ -351,6 +361,13 @@ function dispatchToColumn(ev, col) {
   nickSpan.style.color = nickColor(nick);
   nickSpan.textContent = nick;
   meta.appendChild(nickSpan);
+  if (tag(ev, "t") === "teleport") {
+    const tp = document.createElement("span");
+    tp.className = "teleport";
+    tp.title = "Posté dans ce canal sans y être physiquement (tag bitchat officiel)";
+    tp.textContent = " 📡";
+    meta.appendChild(tp);
+  }
   if (ev.location) {
     const locSpan = document.createElement("span");
     locSpan.className = "loc";
@@ -366,6 +383,8 @@ function dispatchToColumn(ev, col) {
     contentDiv.append(shown.slice(0, hl.start));
     const mark = document.createElement("span");
     mark.className = "hl";
+    mark.style.background = distanceColor(hl.distance);
+    mark.title = `distance ${hl.distance}`;
     mark.textContent = shown.slice(hl.start, hl.end);
     contentDiv.appendChild(mark);
     contentDiv.append(shown.slice(hl.end));

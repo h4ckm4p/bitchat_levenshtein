@@ -63,6 +63,13 @@ function renderMsg(ev, { prepend } = {}) {
   nickSpan.style.color = nickColor(nick);
   nickSpan.textContent = nick;
   meta.appendChild(nickSpan);
+  if (tag(ev, "t") === "teleport") {
+    const tp = document.createElement("span");
+    tp.className = "teleport";
+    tp.title = "Posté dans ce canal sans y être physiquement (tag bitchat officiel)";
+    tp.textContent = " 📡";
+    meta.appendChild(tp);
+  }
   const contentDiv = document.createElement("div");
   contentDiv.className = "content";
   // garde-fou d'affichage même si un message long passe entre les mailles du filtre
