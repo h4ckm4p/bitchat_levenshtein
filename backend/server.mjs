@@ -73,6 +73,13 @@ const MAX_LEN = 3000;
 // \uXXXX plutôt qu'en caractères bruts -- des combinants littéraux dans le code source
 // s'afficheraient collés au caractère précédent, illisibles à relire/vérifier).
 const COMBINING_RE = /[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]/g;
+// pseudo g\u00e9n\u00e9r\u00e9 automatiquement par un bot de spam observ\u00e9 en direct : "bot_" suivi
+// d'un suffixe hexad\u00e9cimal al\u00e9atoire (ex: bot_faff61fc) -- change \u00e0 chaque message pour
+// contourner un blocage par pseudo, donnant l'impression trompeuse que "le pseudo change
+// sans arr\u00eat" alors que c'est le m\u00eame spam r\u00e9p\u00e9t\u00e9. Motif tr\u00e8s sp\u00e9cifique : v\u00e9rifi\u00e9 sur la
+// base r\u00e9elle, aucun faux positif parmi les pseudos l\u00e9gitimes contenant "bot" (Nymbot,
+// infobot, AntiSpamBot, nano_bot#..., etc. ont tous un format diff\u00e9rent).
+const BOT_NICK_RE = /^bot_[0-9a-f]{6,8}$/;
 
 // annuaire officiel bitchat (permissionlesstech/georelays, nostr_relays.csv), dédupliqué
 // (host vs host:443 — cf. georelays issue #14) — snapshot figé dans relays.json, voir
@@ -192,7 +199,8 @@ function tagValue(ev, name) {
 // la validité JSON globale).
 // Détecte aussi deux abus observés en direct : des messages énormes (ex: 300 Ko) et le
 // spam "zalgo" (empilement de caractères Unicode combinants pour casser l'affichage).
-function isNoise(content) {
+function isNoise(content, nickname) {
+  if (nickname && BOT_NICK_RE.test(nickname)) return true;
   const text = (content || "").trim();
   if (text.length > MAX_LEN) return true;
   if (text.startsWith("{") || text.startsWith("[")) {
@@ -204,11 +212,11 @@ function isNoise(content) {
 
 // reclassifie rétroactivement ce que l'ancien filtre (plus étroit) avait laissé passer
 function reclassifyNoise() {
-  const candidates = db.prepare(`SELECT id, content FROM events WHERE is_noise = 0`).all();
+  const candidates = db.prepare(`SELECT id, content, nickname FROM events WHERE is_noise = 0`).all();
   const markNoise = db.prepare(`UPDATE events SET is_noise = 1 WHERE id = ?`);
   let n = 0;
   db.transaction((rows) => {
-    for (const r of rows) if (isNoise(r.content)) { markNoise.run(r.id); n++; }
+    for (const r of rows) if (isNoise(r.content, r.nickname)) { markNoise.run(r.id); n++; }
   })(candidates);
   if (n > 0) console.log(`reclassification : ${n} messages requalifiés en bruit (filtre élargi)`);
 }
@@ -270,7 +278,8 @@ function connectRelay(url) {
     if (seenIds.has(ev.id)) return;
     seenIds.add(ev.id);
 
-    const noise = isNoise(ev.content ?? "");
+    const nickname = tagValue(ev, "n") || null;
+    const noise = isNoise(ev.content ?? "", nickname);
     const geohash = tagValue(ev, "g") || null;
     const location = describeGeohash(geohash);
     // tag officiel bitchat ["t","teleport"] : présent quand l'auteur poste dans ce canal
@@ -282,7 +291,7 @@ function connectRelay(url) {
       created_at: ev.created_at,
       received_at: Math.floor(Date.now() / 1000),
       geohash,
-      nickname: tagValue(ev, "n") || null,
+      nickname,
       content: ev.content ?? "",
       is_noise: noise ? 1 : 0,
       relay_origin: url,
@@ -353,12 +362,31 @@ const server = createServer((req, res) => {
     const geohash = params.get("geohash");
     if (!geohash) { res.writeHead(400).end("paramètre geohash requis"); return; }
     const limit = Math.min(2000, Number(params.get("limit")) || 500);
-    const rows = db.prepare(`
-      SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
-      WHERE is_noise = 0 AND geohash = ? ORDER BY created_at DESC LIMIT ?
-    `).all(geohash, limit).map(toClientShape);
+    const around = Number(params.get("around")) || null;
+    let rows;
+    if (around) {
+      // un canal très actif peut dépasser `limit` messages en quelques minutes --
+      // "les N plus récents" ne remonte alors jamais jusqu'à un message cliqué plus
+      // ancien. On centre la fenêtre sur son horodatage (moitié avant, moitié après)
+      // au lieu de se baser uniquement sur le présent.
+      const half = Math.ceil(limit / 2);
+      const before = db.prepare(`
+        SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
+        WHERE is_noise = 0 AND geohash = ? AND created_at <= ? ORDER BY created_at DESC LIMIT ?
+      `).all(geohash, around, half);
+      const after = db.prepare(`
+        SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
+        WHERE is_noise = 0 AND geohash = ? AND created_at > ? ORDER BY created_at ASC LIMIT ?
+      `).all(geohash, around, half);
+      rows = [...after.reverse(), ...before]; // tri global décroissant, comme le cas sans `around`
+    } else {
+      rows = db.prepare(`
+        SELECT id, pubkey, created_at, geohash, nickname, content, location, teleported FROM events
+        WHERE is_noise = 0 AND geohash = ? ORDER BY created_at DESC LIMIT ?
+      `).all(geohash, limit);
+    }
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ geohash, label: describeGeohash(geohash), messages: rows }));
+    res.end(JSON.stringify({ geohash, label: describeGeohash(geohash), messages: rows.map(toClientShape) }));
     return;
   }
   if (req.url.startsWith("/api/search")) {

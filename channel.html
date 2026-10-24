@@ -19,6 +19,7 @@
   #header .live { margin-left: auto; color: #8b98a5; font-size: 12px; }
   #messages { flex: 1; overflow-y: auto; padding: 10px; max-width: 760px; margin: 0 auto; width: 100%; }
   .msg { padding: 10px; margin-bottom: 8px; background: #1c1f23; border-radius: 8px; border: 1px solid #23262b; }
+  .msg.target { background: #16304a; border-color: #1d9bf0; box-shadow: 0 0 0 1px #1d9bf0; }
   .msg .meta { color: #8b98a5; font-size: 11px; margin-bottom: 4px; }
   .msg .meta .nick { font-weight: 600; }
   .msg .content { word-break: break-word; white-space: pre-wrap; }
@@ -37,6 +38,8 @@
 const BACKEND = "http://127.0.0.1:8787";
 const params = new URLSearchParams(location.search);
 const geohash = params.get("g") || "";
+const targetId = params.get("id") || "";
+const targetTs = params.get("ts") || "";
 document.getElementById("hGeohash").textContent = `#${geohash || "?"}`;
 
 function nickColor(nick) {
@@ -55,6 +58,8 @@ function renderMsg(ev, { prepend } = {}) {
   const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const div = document.createElement("div");
   div.className = "msg";
+  div.dataset.id = ev.id;
+  if (ev.id === targetId) div.classList.add("target");
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.append(`[${time}] `);
@@ -87,7 +92,11 @@ const seenIds = new Set();
 if (!geohash) {
   document.getElementById("messages").innerHTML = '<div class="empty">aucun canal précisé (paramètre ?g=)</div>';
 } else {
-  fetch(`${BACKEND}/api/channel?geohash=${encodeURIComponent(geohash)}&limit=500`)
+  // centre la fenêtre sur le message cliqué (ts) plutôt que sur l'instant présent : un
+  // canal très actif peut dépasser 2000 messages en quelques minutes, donc "les N plus
+  // récents" ne remonte jamais jusqu'à un message plus ancien autrement.
+  const aroundParam = targetTs ? `&around=${encodeURIComponent(targetTs)}` : "";
+  fetch(`${BACKEND}/api/channel?geohash=${encodeURIComponent(geohash)}&limit=2000${aroundParam}`)
     .then((r) => r.json())
     .then(({ label, messages }) => {
       document.getElementById("hLabel").textContent = label || "";
@@ -98,7 +107,17 @@ if (!geohash) {
         seenIds.add(ev.id);
         renderMsg(ev);
       });
-      document.getElementById("messages").scrollTop = document.getElementById("messages").scrollHeight;
+      const root = document.getElementById("messages");
+      const targetEl = targetId ? root.querySelector(`[data-id="${CSS.escape(targetId)}"]`) : null;
+      if (targetEl) {
+        targetEl.scrollIntoView({ block: "center" });
+      } else {
+        root.scrollTop = root.scrollHeight;
+        if (targetId) {
+          document.getElementById("hLive").textContent =
+            "message ciblé hors de la fenêtre d'historique affichée (purge ou plus ancien que 2000 messages)";
+        }
+      }
     })
     .catch((e) => {
       document.getElementById("hLive").textContent = "backend local injoignable";

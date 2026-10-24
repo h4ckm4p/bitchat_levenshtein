@@ -380,7 +380,7 @@ function dispatchToColumn(ev, col) {
   const div = document.createElement("div");
   div.className = "msg";
   div.title = "Cliquer pour voir tout le canal";
-  div.onclick = () => window.open(`channel.html?g=${encodeURIComponent(geohash)}`, "_blank");
+  div.onclick = () => window.open(`channel.html?g=${encodeURIComponent(geohash)}&id=${encodeURIComponent(ev.id)}&ts=${ev.created_at}`, "_blank");
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.append(`[${time}] #${geohash} `);
