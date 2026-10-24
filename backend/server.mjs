@@ -9,8 +9,52 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { SocksProxyAgent } from "socks-proxy-agent";
+import ngeohash from "ngeohash";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// --- traduction geohash -> lieu lisible (100% hors-ligne, aucun appel externe de
+// géocodage : ça enverrait les zones surveillées à un tiers, contraire à l'anonymat
+// recherché ici). Précision déduite de la longueur du geohash (cf. doc bitchat :
+// 7=bloc, 6=quartier, 5=ville, 4=province, <=2=région), ville la plus proche cherchée
+// dans une petite liste embarquée (backend/cities.json) via distance à vol d'oiseau.
+const CITIES = JSON.parse(readFileSync(join(__dirname, "cities.json"), "utf8"));
+
+function precisionLabel(geohash) {
+  const len = (geohash || "").length;
+  if (len >= 7) return "bloc";
+  if (len === 6) return "quartier";
+  if (len === 5) return "ville";
+  if (len === 4) return "province";
+  if (len > 0 && len <= 2) return "région";
+  return "zone";
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// shortcut: ~150 villes majeures seulement (pas de dataset mondial exhaustif, pour
+// rester léger et 100% embarqué) -- une zone loin de toute grande ville peut remonter
+// une ville à plusieurs dizaines/centaines de km, d'où la distance affichée.
+function describeGeohash(geohash) {
+  if (!geohash) return null;
+  let point;
+  try { point = ngeohash.decode(geohash); } catch { return null; }
+  if (!point || Number.isNaN(point.latitude)) return null;
+  let nearest = null, best = Infinity;
+  for (const c of CITIES) {
+    const d = haversineKm(point.latitude, point.longitude, c.lat, c.lon);
+    if (d < best) { best = d; nearest = c; }
+  }
+  const precision = precisionLabel(geohash);
+  return nearest ? `${precision} — près de ${nearest.name} (${Math.round(best)}km)` : precision;
+}
 
 const PORT = process.env.PORT || 8787;
 // À l'intérieur du conteneur on écoute sur toutes les interfaces (sinon Docker ne peut
@@ -23,6 +67,12 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   "https://h4ckm4p.github.io,http://localhost,http://127.0.0.1"
 ).split(",").map((s) => s.trim());
 const RETENTION_DAYS = Number(process.env.RETENTION_DAYS) || 30;
+
+const MAX_LEN = 3000;
+// plages Unicode des diacritiques combinants utilisées par le spam "zalgo" (écrites en
+// \uXXXX plutôt qu'en caractères bruts -- des combinants littéraux dans le code source
+// s'afficheraient collés au caractère précédent, illisibles à relire/vérifier).
+const COMBINING_RE = /[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]/g;
 
 // annuaire officiel bitchat (permissionlesstech/georelays, nostr_relays.csv), dédupliqué
 // (host vs host:443 — cf. georelays issue #14) — snapshot figé dans relays.json, voir
@@ -50,12 +100,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 `);
+// migration : ajoute "location" (lieu décodé du geohash) aux bases créées avant cette colonne
+const hasLocationCol = db.prepare(`PRAGMA table_info(events)`).all().some((c) => c.name === "location");
+if (!hasLocationCol) db.exec(`ALTER TABLE events ADD COLUMN location TEXT`);
+
 const insertStmt = db.prepare(`
-  INSERT OR IGNORE INTO events (id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin)
-  VALUES (@id, @pubkey, @created_at, @received_at, @geohash, @nickname, @content, @is_noise, @relay_origin)
+  INSERT OR IGNORE INTO events (id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin, location)
+  VALUES (@id, @pubkey, @created_at, @received_at, @geohash, @nickname, @content, @is_noise, @relay_origin, @location)
 `);
 const recentStmt = db.prepare(`
-  SELECT id, pubkey, created_at, geohash, nickname, content FROM events
+  SELECT id, pubkey, created_at, geohash, nickname, content, location FROM events
   WHERE is_noise = 0 ORDER BY created_at DESC LIMIT ?
 `);
 const countStmt = db.prepare(`SELECT COUNT(*) AS n FROM events`);
@@ -65,9 +119,11 @@ const byGeohashStmt = db.prepare(`
   WHERE is_noise = 0 AND geohash IS NOT NULL
   GROUP BY geohash ORDER BY n DESC LIMIT 50
 `);
-const exportStmt = db.prepare(`
-  SELECT id, pubkey, created_at, received_at, geohash, nickname, content FROM events
-  WHERE is_noise = 0 AND geohash = ? ORDER BY created_at ASC
+// export : tout l'historique non-bruit, filtré ensuite en JS par terme+distance (pas en SQL,
+// la distance de Levenshtein n'a pas d'équivalent simple en SQL -- cf. matches() plus bas)
+const exportAllStmt = db.prepare(`
+  SELECT id, pubkey, created_at, received_at, geohash, location, nickname, content FROM events
+  WHERE is_noise = 0 ORDER BY created_at ASC
 `);
 const cleanupStmt = db.prepare(`DELETE FROM events WHERE received_at < ?`);
 
@@ -79,22 +135,76 @@ function cleanupOldMessages() {
 }
 cleanupOldMessages();
 setInterval(cleanupOldMessages, 60 * 60 * 1000); // toutes les heures
+reclassifyNoise();
+backfillLocations();
+
+// calcule le lieu des messages insérés avant l'ajout de cette fonctionnalité
+function backfillLocations() {
+  const rows = db.prepare(
+    `SELECT id, geohash FROM events WHERE location IS NULL AND geohash IS NOT NULL`
+  ).all();
+  const update = db.prepare(`UPDATE events SET location = ? WHERE id = ?`);
+  db.transaction((rs) => {
+    for (const r of rs) update.run(describeGeohash(r.geohash), r.id);
+  })(rows);
+  if (rows.length > 0) console.log(`${rows.length} messages existants complétés avec leur lieu`);
+}
+
+// distance de Levenshtein + matches() : identiques à celles du dashboard (index.html/
+// local.html), dupliquées ici pour filtrer l'export par terme de recherche côté serveur.
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j - 1], prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+function matches(content, term, dist) {
+  const text = (content || "").toLowerCase();
+  const t = term.toLowerCase();
+  if (dist <= 0) return text.includes(t);
+  const words = text.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return words.some((w) => levenshtein(w, t) <= dist);
+}
 
 function tagValue(ev, name) {
   return ev.tags.find((t) => t[0] === name)?.[1];
 }
 
-// shortcut: même heuristique que le dashboard — un message de chat humain n'est
-// quasiment jamais du JSON valide avec un champ "type".
+// un message de chat humain n'est quasiment jamais du JSON valide, peu importe sa forme
+// (handshake/nearby-presence avaient un champ "type", mais les chunks d'image base64
+// ("v","ts","n","frame") n'en ont pas -- donc on ne teste plus un champ précis, juste
+// la validité JSON globale).
+// Détecte aussi deux abus observés en direct : des messages énormes (ex: 300 Ko) et le
+// spam "zalgo" (empilement de caractères Unicode combinants pour casser l'affichage).
 function isNoise(content) {
   const text = (content || "").trim();
-  if (!text.startsWith("{")) return false;
-  try {
-    const obj = JSON.parse(text);
-    return typeof obj === "object" && obj !== null && typeof obj.type === "string";
-  } catch {
-    return false;
+  if (text.length > MAX_LEN) return true;
+  if (text.startsWith("{") || text.startsWith("[")) {
+    try { JSON.parse(text); return true; } catch { /* pas du JSON, continue */ }
   }
+  const combining = (text.match(COMBINING_RE) || []).length;
+  return text.length > 0 && combining / text.length > 0.3;
+}
+
+// reclassifie rétroactivement ce que l'ancien filtre (plus étroit) avait laissé passer
+function reclassifyNoise() {
+  const candidates = db.prepare(`SELECT id, content FROM events WHERE is_noise = 0`).all();
+  const markNoise = db.prepare(`UPDATE events SET is_noise = 1 WHERE id = ?`);
+  let n = 0;
+  db.transaction((rows) => {
+    for (const r of rows) if (isNoise(r.content)) { markNoise.run(r.id); n++; }
+  })(candidates);
+  if (n > 0) console.log(`reclassification : ${n} messages requalifiés en bruit (filtre élargi)`);
 }
 
 function toClientShape(row) {
@@ -103,6 +213,7 @@ function toClientShape(row) {
     pubkey: row.pubkey,
     created_at: row.created_at,
     content: row.content,
+    location: row.location,
     tags: [["g", row.geohash || ""], ["n", row.nickname || ""]],
   };
 }
@@ -152,18 +263,21 @@ function connectRelay(url) {
     seenIds.add(ev.id);
 
     const noise = isNoise(ev.content ?? "");
+    const geohash = tagValue(ev, "g") || null;
+    const location = describeGeohash(geohash);
     insertStmt.run({
       id: ev.id,
       pubkey: ev.pubkey,
       created_at: ev.created_at,
       received_at: Math.floor(Date.now() / 1000),
-      geohash: tagValue(ev, "g") || null,
+      geohash,
       nickname: tagValue(ev, "n") || null,
       content: ev.content ?? "",
       is_noise: noise ? 1 : 0,
       relay_origin: url,
+      location,
     });
-    if (!noise) broadcast(ev);
+    if (!noise) broadcast({ ...ev, location });
   });
 
   // shortcut: toute la logique de reconnexion vit dans "close" — onerror est toujours
@@ -218,27 +332,44 @@ const server = createServer((req, res) => {
       totalMessages: countStmt.get().n,
       totalNoise: countNoiseStmt.get().n,
       retentionDays: RETENTION_DAYS,
-      byGeohash: byGeohashStmt.all(),
+      byGeohash: byGeohashStmt.all().map((r) => ({ ...r, label: describeGeohash(r.geohash) })),
     }));
     return;
   }
-  if (req.url.startsWith("/api/export")) {
+  if (req.url.startsWith("/api/channel")) {
     const params = new URL(req.url, "http://x").searchParams;
     const geohash = params.get("geohash");
+    if (!geohash) { res.writeHead(400).end("paramètre geohash requis"); return; }
+    const limit = Math.min(2000, Number(params.get("limit")) || 500);
+    const rows = db.prepare(`
+      SELECT id, pubkey, created_at, geohash, nickname, content, location FROM events
+      WHERE is_noise = 0 AND geohash = ? ORDER BY created_at DESC LIMIT ?
+    `).all(geohash, limit).map(toClientShape);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ geohash, label: describeGeohash(geohash), messages: rows }));
+    return;
+  }
+  if (req.url.startsWith("/api/export")) {
+    // export des messages d'une RECHERCHE (terme + distance, comme une colonne du
+    // dashboard), pas d'un geohash brut -- mêmes règles de correspondance qu'à l'écran.
+    const params = new URL(req.url, "http://x").searchParams;
+    const term = params.get("term");
+    const dist = Number(params.get("dist")) || 0;
     const format = params.get("format") === "csv" ? "csv" : "json";
-    if (!geohash) {
-      res.writeHead(400).end("paramètre geohash requis");
+    if (!term) {
+      res.writeHead(400).end("paramètre term requis");
       return;
     }
-    const rows = exportStmt.all(geohash);
-    const filename = `bitchat-${geohash}.${format}`;
+    const rows = exportAllStmt.all().filter((r) => matches(r.content, term, dist));
+    const safeTerm = term.replace(/[^a-z0-9]+/gi, "_").slice(0, 40) || "recherche";
+    const filename = `bitchat-${safeTerm}.${format}`;
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     if (format === "csv") {
       res.setHeader("Content-Type", "text/csv");
       const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-      const header = "id,pubkey,created_at,received_at,geohash,nickname,content\n";
+      const header = "id,pubkey,created_at,received_at,geohash,location,nickname,content\n";
       const body = rows.map((r) =>
-        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.nickname, r.content].map(esc).join(",")
+        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.location, r.nickname, r.content].map(esc).join(",")
       ).join("\n");
       res.end(header + body);
     } else {

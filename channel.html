@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>bitchat — canal</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: #15181c; color: #e7e9ea; font: 14px/1.4 -apple-system, "Segoe UI", sans-serif;
+  }
+  #header {
+    display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+    background: #1c1f23; border-bottom: 1px solid #2a2e33; flex-shrink: 0;
+  }
+  #header .geohash { font-weight: 700; font-size: 16px; }
+  #header .label { color: #8b98a5; font-size: 13px; }
+  #header .live { margin-left: auto; color: #8b98a5; font-size: 12px; }
+  #messages { flex: 1; overflow-y: auto; padding: 10px; max-width: 760px; margin: 0 auto; width: 100%; }
+  .msg { padding: 10px; margin-bottom: 8px; background: #1c1f23; border-radius: 8px; border: 1px solid #23262b; }
+  .msg .meta { color: #8b98a5; font-size: 11px; margin-bottom: 4px; }
+  .msg .meta .nick { font-weight: 600; }
+  .msg .content { word-break: break-word; white-space: pre-wrap; }
+  .empty { color: #5b6672; padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+  <div id="header">
+    <span class="geohash" id="hGeohash">#…</span>
+    <span class="label" id="hLabel"></span>
+    <span class="live" id="hLive">chargement…</span>
+  </div>
+  <div id="messages"><div class="empty">chargement de l'historique…</div></div>
+
+<script>
+const BACKEND = "http://127.0.0.1:8787";
+const params = new URLSearchParams(location.search);
+const geohash = params.get("g") || "";
+document.getElementById("hGeohash").textContent = `#${geohash || "?"}`;
+
+function nickColor(nick) {
+  let hash = 0;
+  for (let i = 0; i < nick.length; i++) hash = (hash * 31 + nick.charCodeAt(i)) | 0;
+  return `hsl(${Math.abs(hash) % 360}, 70%, 65%)`;
+}
+
+function tag(ev, name) {
+  return ev.tags.find((x) => x[0] === name)?.[1];
+}
+
+function renderMsg(ev, { prepend } = {}) {
+  const content = ev.content ?? "";
+  const time = new Date(ev.created_at * 1000).toLocaleString();
+  const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
+  const div = document.createElement("div");
+  div.className = "msg";
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.append(`[${time}] `);
+  const nickSpan = document.createElement("span");
+  nickSpan.className = "nick";
+  nickSpan.style.color = nickColor(nick);
+  nickSpan.textContent = nick;
+  meta.appendChild(nickSpan);
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "content";
+  // garde-fou d'affichage même si un message long passe entre les mailles du filtre
+  contentDiv.textContent = content.length > 1500 ? content.slice(0, 1500) + "…" : content;
+  div.append(meta, contentDiv);
+  const root = document.getElementById("messages");
+  const empty = root.querySelector(".empty");
+  if (empty) empty.remove();
+  if (prepend) root.prepend(div); else root.appendChild(div);
+  return div;
+}
+
+const seenIds = new Set();
+
+if (!geohash) {
+  document.getElementById("messages").innerHTML = '<div class="empty">aucun canal précisé (paramètre ?g=)</div>';
+} else {
+  fetch(`${BACKEND}/api/channel?geohash=${encodeURIComponent(geohash)}&limit=500`)
+    .then((r) => r.json())
+    .then(({ label, messages }) => {
+      document.getElementById("hLabel").textContent = label || "";
+      document.getElementById("hLive").textContent = "historique chargé, écoute en direct…";
+      // plus ancien en premier à l'écran
+      messages.slice().reverse().forEach((ev) => {
+        if (seenIds.has(ev.id)) return;
+        seenIds.add(ev.id);
+        renderMsg(ev);
+      });
+      document.getElementById("messages").scrollTop = document.getElementById("messages").scrollHeight;
+    })
+    .catch((e) => {
+      document.getElementById("hLive").textContent = "backend local injoignable";
+      console.error(e);
+    });
+
+  // écoute les messages à venir sur ce canal précis (filtrage côté page, le WS du
+  // backend diffuse tous les canaux — pas de flux dédié par canal côté serveur)
+  let attempts = 0;
+  const DELAYS = [500, 1000, 2000, 5000, 15000, 60000];
+  function connect() {
+    const ws = new WebSocket(BACKEND.replace(/^http/, "ws") + "/ws");
+    ws.onopen = () => { attempts = 0; };
+    ws.onmessage = (e) => {
+      let ev;
+      try { ev = JSON.parse(e.data); } catch { return; }
+      if (tag(ev, "g") !== geohash) return;
+      if (seenIds.has(ev.id)) return;
+      seenIds.add(ev.id);
+      const root = document.getElementById("messages");
+      const atBottom = root.scrollTop + root.clientHeight >= root.scrollHeight - 40;
+      const el = renderMsg(ev);
+      if (atBottom) el.scrollIntoView({ block: "end" });
+    };
+    ws.onerror = () => {};
+    ws.onclose = () => {
+      document.getElementById("hLive").textContent = "déconnecté, reconnexion…";
+      const delay = DELAYS[Math.min(attempts, DELAYS.length - 1)];
+      attempts++;
+      setTimeout(connect, delay * (0.75 + Math.random() * 0.5));
+    };
+  }
+  connect();
+}
+</script>
+</body>
+</html>

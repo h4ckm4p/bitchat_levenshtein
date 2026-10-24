@@ -5,7 +5,7 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
-COPY server.mjs relays.json ./
+COPY server.mjs relays.json cities.json ./
 
 ENV NODE_ENV=production
 VOLUME ["/app/data"]

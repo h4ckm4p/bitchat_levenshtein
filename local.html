@@ -60,6 +60,7 @@
     background: #0f1113; border: 1px solid #263040; color: #e7e9ea;
     padding: 6px 10px; border-radius: 6px; width: 140px;
   }
+  #statsBar label { color: #8b98a5; font-size: 12px; }
   #statsBar select {
     background: #0f1113; border: 1px solid #263040; color: #e7e9ea;
     padding: 6px; border-radius: 6px;
@@ -76,17 +77,21 @@
   }
   .col-head {
     padding: 10px 12px; background: #1c1f23; border-bottom: 1px solid #2a2e33;
-    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0; cursor: grab;
   }
+  .col.dragging { opacity: 0.4; }
+  .col.drag-over { box-shadow: inset 2px 0 0 #1d9bf0; }
   .col-head .term { font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .col-head .dist { color: #8b98a5; font-size: 11px; }
   .col-head .count { color: #8b98a5; font-size: 11px; min-width: 2em; text-align: right; }
   .col-head .close { cursor: pointer; color: #8b98a5; padding: 0 2px; }
   .col-head .close:hover { color: #f4212e; }
   .col-body { flex: 1; overflow-y: auto; padding: 6px; }
-  .msg { padding: 8px; margin-bottom: 6px; background: #1c1f23; border-radius: 8px; border: 1px solid #23262b; }
+  .msg { padding: 8px; margin-bottom: 6px; background: #1c1f23; border-radius: 8px; border: 1px solid #23262b; cursor: pointer; }
+  .msg:hover { border-color: #1d9bf0; }
   .msg .meta { color: #8b98a5; font-size: 11px; margin-bottom: 3px; }
   .msg .meta .nick { color: #1d9bf0; }
+  .msg .meta .loc { color: #5b6672; }
   .msg .content { word-break: break-word; white-space: pre-wrap; }
   .empty { color: #5b6672; padding: 20px; text-align: center; font-size: 12px; }
 </style>
@@ -108,12 +113,13 @@
     <div id="blockedCount">0 messages bloqués</div>
   </div>
   <div id="statsBar">
-    <input type="text" id="exportGeohash" placeholder="geohash du canal (ex: u09tv)" />
+    <input type="text" id="exportTerm" placeholder="terme à exporter" />
+    <label>distance <input type="number" id="exportDist" min="0" max="4" value="0" /></label>
     <select id="exportFormat">
       <option value="json">JSON</option>
       <option value="csv">CSV</option>
     </select>
-    <button id="exportBtn">Exporter le canal</button>
+    <button id="exportBtn">Exporter la recherche</button>
     <div id="storedCount">… messages stockés</div>
   </div>
   <div id="columns"></div>
@@ -156,6 +162,13 @@ function tag(ev, name) {
   return ev.tags.find((x) => x[0] === name)?.[1];
 }
 
+// couleur stable par pseudo : hash du nom -> teinte HSL (même pseudo = toujours la même couleur)
+function nickColor(nick) {
+  let hash = 0;
+  for (let i = 0; i < nick.length; i++) hash = (hash * 31 + nick.charCodeAt(i)) | 0;
+  return `hsl(${Math.abs(hash) % 360}, 70%, 65%)`;
+}
+
 // --- état des colonnes ---
 // shortcut: id stable par colonne (pas l'index dans le tableau) — permet d'ajouter/retirer
 // une colonne sans jamais recréer le DOM des autres (ce qui effaçait leurs messages affichés).
@@ -168,10 +181,29 @@ function saveColumns() {
   localStorage.setItem("bc_columns_local", JSON.stringify(columns));
 }
 
+// glisser-déposer pour réordonner les colonnes (id de la colonne en cours de glissement)
+let draggedId = null;
+
+function reorderColumns(draggedId, targetId) {
+  const fromIdx = columns.findIndex((c) => c.id === draggedId);
+  const toIdx = columns.findIndex((c) => c.id === targetId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+  const [moved] = columns.splice(fromIdx, 1);
+  columns.splice(toIdx, 0, moved);
+  saveColumns();
+  // déplace juste le nœud DOM concerné (jamais de recréation -> messages/compteurs intacts)
+  const root = document.getElementById("columns");
+  const draggedEl = root.querySelector(`.col[data-id="${draggedId}"]`);
+  const targetEl = root.querySelector(`.col[data-id="${targetId}"]`);
+  if (fromIdx < toIdx) targetEl.after(draggedEl);
+  else targetEl.before(draggedEl);
+}
+
 function createColumnEl(col) {
   const el = document.createElement("div");
   el.className = "col";
   el.dataset.id = col.id;
+  el.draggable = true;
   el.innerHTML = `
     <div class="col-head">
       <span class="term">${col.term}</span>
@@ -182,6 +214,25 @@ function createColumnEl(col) {
     <div class="col-body" id="body-${col.id}"><div class="empty">en attente de messages…</div></div>
   `;
   el.querySelector(".close").onclick = () => removeColumn(col.id);
+  el.addEventListener("dragstart", () => {
+    draggedId = col.id;
+    el.classList.add("dragging");
+  });
+  el.addEventListener("dragend", () => {
+    draggedId = null;
+    el.classList.remove("dragging");
+    document.querySelectorAll(".col.drag-over").forEach((n) => n.classList.remove("drag-over"));
+  });
+  el.addEventListener("dragover", (e) => {
+    e.preventDefault(); // requis pour autoriser le drop
+    if (draggedId && draggedId !== col.id) el.classList.add("drag-over");
+  });
+  el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.classList.remove("drag-over");
+    if (draggedId && draggedId !== col.id) reorderColumns(draggedId, col.id);
+  });
   return el;
 }
 
@@ -264,10 +315,32 @@ function dispatchToColumn(ev, col) {
   const time = new Date(ev.created_at * 1000).toLocaleTimeString();
   const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const geohash = tag(ev, "g") || "?";
+
+  // shortcut: nick/geohash/lieu viennent du réseau (non fiables) -> construits via
+  // textContent, jamais via innerHTML, pour ne pas exécuter du HTML/JS injecté.
   const div = document.createElement("div");
   div.className = "msg";
-  div.innerHTML = `<div class="meta">[${time}] #${geohash} <span class="nick">${nick}</span></div><div class="content"></div>`;
-  div.querySelector(".content").textContent = content;
+  div.title = "Cliquer pour voir tout le canal";
+  div.onclick = () => window.open(`channel.html?g=${encodeURIComponent(geohash)}`, "_blank");
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.append(`[${time}] #${geohash} `);
+  const nickSpan = document.createElement("span");
+  nickSpan.className = "nick";
+  nickSpan.style.color = nickColor(nick);
+  nickSpan.textContent = nick;
+  meta.appendChild(nickSpan);
+  if (ev.location) {
+    const locSpan = document.createElement("span");
+    locSpan.className = "loc";
+    locSpan.textContent = ` · ${ev.location}`;
+    meta.appendChild(locSpan);
+  }
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "content";
+  // garde-fou d'affichage même si un message long passe entre les mailles du filtre
+  contentDiv.textContent = content.length > 1500 ? content.slice(0, 1500) + "…" : content;
+  div.append(meta, contentDiv);
   body.prepend(div);
   const countEl = document.getElementById(`count-${col.id}`);
   countEl.textContent = +countEl.textContent + 1;
@@ -321,10 +394,11 @@ updateStoredCount();
 setInterval(updateStoredCount, 10000);
 
 document.getElementById("exportBtn").onclick = () => {
-  const geohash = document.getElementById("exportGeohash").value.trim();
-  if (!geohash) return;
+  const term = document.getElementById("exportTerm").value.trim();
+  if (!term) return;
+  const dist = +document.getElementById("exportDist").value || 0;
   const format = document.getElementById("exportFormat").value;
-  window.open(`${BACKEND}/api/export?geohash=${encodeURIComponent(geohash)}&format=${format}`, "_blank");
+  window.open(`${BACKEND}/api/export?term=${encodeURIComponent(term)}&dist=${dist}&format=${format}`, "_blank");
 };
 
 fetch(`${BACKEND}/api/messages?limit=500`)

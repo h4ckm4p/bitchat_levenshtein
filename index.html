@@ -59,8 +59,10 @@
   }
   .col-head {
     padding: 10px 12px; background: #1c1f23; border-bottom: 1px solid #2a2e33;
-    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0; cursor: grab;
   }
+  .col.dragging { opacity: 0.4; }
+  .col.drag-over { box-shadow: inset 2px 0 0 #1d9bf0; }
   .col-head .term { font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .col-head .dist { color: #8b98a5; font-size: 11px; }
   .col-head .count { color: #8b98a5; font-size: 11px; min-width: 2em; text-align: right; }
@@ -132,18 +134,20 @@ function tag(ev, name) {
   return ev.tags.find((x) => x[0] === name)?.[1];
 }
 
-// shortcut: un message de chat humain n'est quasiment jamais du JSON valide avec un champ
-// "type" — heuristique simple pour écarter le bruit protocole d'autres apps (nearby-presence,
-// handshake, etc.) qui partagent les mêmes relais/kind que bitchat.
+// un message de chat humain n'est quasiment jamais du JSON valide (bruit protocole
+// d'autres apps : nearby-presence, handshake, chunks d'image...), ni un pavé de 3000+
+// caracteres, ni majoritairement des diacritiques Unicode combinants (spam "zalgo" vu
+// en direct : un message de 300 Ko qui casse l'affichage).
+const MAX_LEN = 3000;
+const COMBINING_RE = /[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]/g;
 function isNoise(content) {
   const text = content.trim();
-  if (!text.startsWith("{")) return false;
-  try {
-    const obj = JSON.parse(text);
-    return typeof obj === "object" && obj !== null && typeof obj.type === "string";
-  } catch {
-    return false;
+  if (text.length > MAX_LEN) return true;
+  if (text.startsWith("{") || text.startsWith("[")) {
+    try { JSON.parse(text); return true; } catch { /* pas du JSON, continue */ }
   }
+  const combining = (text.match(COMBINING_RE) || []).length;
+  return text.length > 0 && combining / text.length > 0.3;
 }
 
 // --- état des colonnes ---
@@ -158,10 +162,36 @@ function saveColumns() {
   localStorage.setItem("bc_columns", JSON.stringify(columns));
 }
 
+// couleur stable par pseudo : hash du nom -> teinte HSL (même pseudo = toujours la même couleur)
+function nickColor(nick) {
+  let hash = 0;
+  for (let i = 0; i < nick.length; i++) hash = (hash * 31 + nick.charCodeAt(i)) | 0;
+  return `hsl(${Math.abs(hash) % 360}, 70%, 65%)`;
+}
+
+// glisser-déposer pour réordonner les colonnes (id de la colonne en cours de glissement)
+let draggedId = null;
+
+function reorderColumns(draggedId, targetId) {
+  const fromIdx = columns.findIndex((c) => c.id === draggedId);
+  const toIdx = columns.findIndex((c) => c.id === targetId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+  const [moved] = columns.splice(fromIdx, 1);
+  columns.splice(toIdx, 0, moved);
+  saveColumns();
+  // déplace juste le nœud DOM concerné (jamais de recréation -> messages/compteurs intacts)
+  const root = document.getElementById("columns");
+  const draggedEl = root.querySelector(`.col[data-id="${draggedId}"]`);
+  const targetEl = root.querySelector(`.col[data-id="${targetId}"]`);
+  if (fromIdx < toIdx) targetEl.after(draggedEl);
+  else targetEl.before(draggedEl);
+}
+
 function createColumnEl(col) {
   const el = document.createElement("div");
   el.className = "col";
   el.dataset.id = col.id;
+  el.draggable = true;
   el.innerHTML = `
     <div class="col-head">
       <span class="term">${col.term}</span>
@@ -172,6 +202,25 @@ function createColumnEl(col) {
     <div class="col-body" id="body-${col.id}"><div class="empty">en attente de messages…</div></div>
   `;
   el.querySelector(".close").onclick = () => removeColumn(col.id);
+  el.addEventListener("dragstart", () => {
+    draggedId = col.id;
+    el.classList.add("dragging");
+  });
+  el.addEventListener("dragend", () => {
+    draggedId = null;
+    el.classList.remove("dragging");
+    document.querySelectorAll(".col.drag-over").forEach((n) => n.classList.remove("drag-over"));
+  });
+  el.addEventListener("dragover", (e) => {
+    e.preventDefault(); // requis pour autoriser le drop
+    if (draggedId && draggedId !== col.id) el.classList.add("drag-over");
+  });
+  el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.classList.remove("drag-over");
+    if (draggedId && draggedId !== col.id) reorderColumns(draggedId, col.id);
+  });
   return el;
 }
 
@@ -247,10 +296,24 @@ function dispatchToColumn(ev, col) {
   const time = new Date(ev.created_at * 1000).toLocaleTimeString();
   const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const geohash = tag(ev, "g") || "?";
+
+  // shortcut: nick/geohash viennent du réseau (non fiables) -> construits via textContent,
+  // jamais via innerHTML, pour ne pas exécuter du HTML/JS injecté dans un pseudo.
   const div = document.createElement("div");
   div.className = "msg";
-  div.innerHTML = `<div class="meta">[${time}] #${geohash} <span class="nick">${nick}</span></div><div class="content"></div>`;
-  div.querySelector(".content").textContent = content;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.append(`[${time}] #${geohash} `);
+  const nickSpan = document.createElement("span");
+  nickSpan.className = "nick";
+  nickSpan.style.color = nickColor(nick);
+  nickSpan.textContent = nick;
+  meta.appendChild(nickSpan);
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "content";
+  // garde-fou d'affichage même si un message long passe entre les mailles du filtre
+  contentDiv.textContent = content.length > 1500 ? content.slice(0, 1500) + "…" : content;
+  div.append(meta, contentDiv);
   body.prepend(div);
   const countEl = document.getElementById(`count-${col.id}`);
   countEl.textContent = +countEl.textContent + 1;
