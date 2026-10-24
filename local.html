@@ -157,7 +157,10 @@ function tag(ev, name) {
 }
 
 // --- état des colonnes ---
-let columns = JSON.parse(localStorage.getItem("bc_columns_local") || "[]");
+// shortcut: id stable par colonne (pas l'index dans le tableau) — permet d'ajouter/retirer
+// une colonne sans jamais recréer le DOM des autres (ce qui effaçait leurs messages affichés).
+let columns = JSON.parse(localStorage.getItem("bc_columns_local") || "[]")
+  .map((c) => ({ ...c, id: c.id || crypto.randomUUID() }));
 const seenEventIds = new Set();
 const recentEvents = []; // petit buffer pour remplir une colonne qu'on vient d'ajouter
 
@@ -165,39 +168,45 @@ function saveColumns() {
   localStorage.setItem("bc_columns_local", JSON.stringify(columns));
 }
 
+function createColumnEl(col) {
+  const el = document.createElement("div");
+  el.className = "col";
+  el.dataset.id = col.id;
+  el.innerHTML = `
+    <div class="col-head">
+      <span class="term">${col.term}</span>
+      <span class="dist">dist ${col.dist}</span>
+      <span class="count" id="count-${col.id}">0</span>
+      <span class="close">✕</span>
+    </div>
+    <div class="col-body" id="body-${col.id}"><div class="empty">en attente de messages…</div></div>
+  `;
+  el.querySelector(".close").onclick = () => removeColumn(col.id);
+  return el;
+}
+
 function renderColumns() {
+  // rendu complet, seulement au chargement initial de la page
   const root = document.getElementById("columns");
   root.innerHTML = "";
-  columns.forEach((col, idx) => {
-    const el = document.createElement("div");
-    el.className = "col";
-    el.innerHTML = `
-      <div class="col-head">
-        <span class="term">${col.term}</span>
-        <span class="dist">dist ${col.dist}</span>
-        <span class="count" id="count-${idx}">0</span>
-        <span class="close" data-idx="${idx}">✕</span>
-      </div>
-      <div class="col-body" id="body-${idx}"><div class="empty">en attente de messages…</div></div>
-    `;
-    root.appendChild(el);
-  });
-  root.querySelectorAll(".close").forEach((btn) => {
-    btn.onclick = () => {
-      columns.splice(+btn.dataset.idx, 1);
-      saveColumns();
-      renderColumns();
-      recentEvents.forEach((ev) => dispatchEvent(ev));
-    };
-  });
+  columns.forEach((col) => root.appendChild(createColumnEl(col)));
   recentEvents.forEach((ev) => dispatchEvent(ev));
 }
 
 function addColumn(term, dist) {
   if (!term.trim()) return;
-  columns.push({ term: term.trim(), dist });
+  const col = { id: crypto.randomUUID(), term: term.trim(), dist };
+  columns.push(col);
   saveColumns();
-  renderColumns();
+  document.getElementById("columns").appendChild(createColumnEl(col));
+  // ne peuple que la nouvelle colonne depuis le buffer récent — les autres ne sont pas touchées
+  recentEvents.forEach((ev) => { if (!isBlacklisted(ev.content ?? "")) dispatchToColumn(ev, col); });
+}
+
+function removeColumn(id) {
+  columns = columns.filter((c) => c.id !== id);
+  saveColumns();
+  document.querySelector(`.col[data-id="${id}"]`)?.remove();
 }
 
 // --- liste noire (spam/trolls/insultes) : un message qui matche est exclu de toutes les colonnes ---
@@ -237,26 +246,29 @@ function isBlacklisted(content) {
   return blacklist.some((b) => matches(content, b.term, b.dist));
 }
 
-function dispatchEvent(ev) {
+function dispatchToColumn(ev, col) {
   const content = ev.content ?? "";
-  if (isBlacklisted(content)) return;
+  if (!matches(content, col.term, col.dist)) return;
+  const body = document.getElementById(`body-${col.id}`);
+  if (!body) return;
+  const empty = body.querySelector(".empty");
+  if (empty) empty.remove();
   const time = new Date(ev.created_at * 1000).toLocaleTimeString();
   const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const geohash = tag(ev, "g") || "?";
-  columns.forEach((col, idx) => {
-    if (!matches(content, col.term, col.dist)) return;
-    const body = document.getElementById(`body-${idx}`);
-    if (!body) return;
-    const empty = body.querySelector(".empty");
-    if (empty) empty.remove();
-    const div = document.createElement("div");
-    div.className = "msg";
-    div.innerHTML = `<div class="meta">[${time}] #${geohash} <span class="nick">${nick}</span></div><div class="content"></div>`;
-    div.querySelector(".content").textContent = content;
-    body.prepend(div);
-    const countEl = document.getElementById(`count-${idx}`);
-    countEl.textContent = +countEl.textContent + 1;
-  });
+  const div = document.createElement("div");
+  div.className = "msg";
+  div.innerHTML = `<div class="meta">[${time}] #${geohash} <span class="nick">${nick}</span></div><div class="content"></div>`;
+  div.querySelector(".content").textContent = content;
+  body.prepend(div);
+  const countEl = document.getElementById(`count-${col.id}`);
+  countEl.textContent = +countEl.textContent + 1;
+}
+
+function dispatchEvent(ev) {
+  const content = ev.content ?? "";
+  if (isBlacklisted(content)) return;
+  columns.forEach((col) => dispatchToColumn(ev, col));
 }
 
 function ingest(ev) {
