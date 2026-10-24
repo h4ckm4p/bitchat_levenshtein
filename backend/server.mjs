@@ -141,10 +141,36 @@ function cleanupOldMessages() {
   const { changes } = cleanupStmt.run(cutoff);
   if (changes > 0) console.log(`nettoyage : ${changes} messages de plus de ${RETENTION_DAYS}j supprimés`);
 }
-cleanupOldMessages();
-setInterval(cleanupOldMessages, 60 * 60 * 1000); // toutes les heures
-reclassifyNoise();
-backfillLocations();
+// nettoyage des spams "même message, même canal" : un contenu identique posté plusieurs
+// fois sur le même geohash est du bruit quand il vient de peu d'identités différentes
+// (flood depuis quelques comptes) -- pas quand beaucoup de personnes différentes tapent
+// spontanément la même chose courte (ex: ".", "oui"). Deux signaux combinés :
+// - peu de pseudos distincts pour le nombre de répétitions (<=3, ou ratio répétitions/
+//   pseudos élevé -- couvre aussi un bot qui répond au même contenu à des déclencheurs
+//   différents, ex: "ZoukMachine" rejouant les mêmes paroles 292 fois pour 11 pseudos) ;
+// - longueur mini de 8 caractères, pour ne jamais confondre un vrai flood avec une
+//   réaction courte (".", "oui", "lol") que plusieurs humains tapent par coïncidence.
+const DUPLICATE_SPAM_STMT = db.prepare(`
+  SELECT geohash, content, COUNT(*) AS n, COUNT(DISTINCT nickname) AS dn
+  FROM events
+  WHERE is_noise = 0 AND geohash IS NOT NULL AND length(trim(content)) >= 8
+  GROUP BY geohash, content
+  HAVING n >= 5 AND (dn <= 3 OR CAST(n AS REAL) / dn >= 5)
+`);
+const MARK_DUPLICATE_NOISE_STMT = db.prepare(
+  `UPDATE events SET is_noise = 1 WHERE geohash = ? AND content = ? AND is_noise = 0`
+);
+function reclassifyDuplicateSpam() {
+  const groups = DUPLICATE_SPAM_STMT.all();
+  let total = 0;
+  db.transaction((gs) => {
+    for (const g of gs) {
+      const { changes } = MARK_DUPLICATE_NOISE_STMT.run(g.geohash, g.content);
+      total += changes;
+    }
+  })(groups);
+  if (total > 0) console.log(`nettoyage spam : ${total} messages dupliqués (${groups.length} motifs) requalifiés en bruit`);
+}
 
 // calcule le lieu des messages insérés avant l'ajout de cette fonctionnalité
 function backfillLocations() {
@@ -157,6 +183,13 @@ function backfillLocations() {
   })(rows);
   if (rows.length > 0) console.log(`${rows.length} messages existants complétés avec leur lieu`);
 }
+
+cleanupOldMessages();
+setInterval(cleanupOldMessages, 60 * 60 * 1000); // toutes les heures
+reclassifyNoise();
+backfillLocations();
+reclassifyDuplicateSpam();
+setInterval(reclassifyDuplicateSpam, 10 * 60 * 1000); // un flood en cours doit être nettoyé vite, pas au prochain redémarrage
 
 // distance de Levenshtein + matches() : identiques à celles du dashboard (index.html/
 // local.html), dupliquées ici pour filtrer l'export par terme de recherche côté serveur.
