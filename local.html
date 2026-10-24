@@ -80,6 +80,7 @@
     <label>distance <input type="number" id="distInput" min="0" max="4" value="0" /></label>
     <button id="addBtn">+ Colonne</button>
     <div id="freshness" style="color:#8b98a5;font-size:12px;">aucun message reçu</div>
+    <div id="nodeCount" style="color:#8b98a5;font-size:12px;">? nœuds connectés</div>
     <div id="status">connexion au backend local…</div>
   </div>
   <div id="blacklistBar">
@@ -249,6 +250,17 @@ function updateFreshness() {
     : "aucun message reçu";
 }
 setInterval(updateFreshness, 1000);
+
+function updateNodeCount() {
+  fetch(`${BACKEND}/api/status`)
+    .then((r) => r.json())
+    .then(({ relaysConnected, relaysTotal }) => {
+      document.getElementById("nodeCount").textContent = `${relaysConnected}/${relaysTotal} nœuds connectés`;
+    })
+    .catch(() => {});
+}
+updateNodeCount();
+setInterval(updateNodeCount, 5000);
 
 fetch(`${BACKEND}/api/messages?limit=500`)
   .then((r) => r.json())

@@ -95,6 +95,7 @@ function broadcast(ev) {
 }
 
 // --- ingestion relais, avec reconnexion à backoff (même logique que le dashboard) ---
+const relayOpen = {}; // url -> bool, pour exposer le nombre de nœuds connectés via /api/status
 const relayAttempts = {};
 const RECONNECT_DELAYS = [500, 1000, 2000, 5000, 15000, 60000, 300000];
 const STABLE_AFTER_MS = 60000;
@@ -114,6 +115,7 @@ function connectRelay(url) {
   let stableTimer = null;
 
   ws.on("open", () => {
+    relayOpen[url] = true;
     console.log(`[${url}] connecté${TOR_PROXY ? " (via Tor)" : ""}`);
     ws.send(JSON.stringify(["REQ", "ingest", { kinds: [20000] }]));
     stableTimer = setTimeout(() => { relayAttempts[url] = 0; }, STABLE_AFTER_MS);
@@ -146,6 +148,7 @@ function connectRelay(url) {
   // suivi de "close", donc gérer les deux doublerait les tentatives programmées.
   ws.on("error", () => {});
   ws.on("close", () => {
+    relayOpen[url] = false;
     clearTimeout(stableTimer);
     relayAttempts[url] = (relayAttempts[url] || 0) + 1;
     scheduleReconnect(url);
@@ -179,6 +182,12 @@ const server = createServer((req, res) => {
   }
   if (req.url === "/health") {
     res.end("ok");
+    return;
+  }
+  if (req.url === "/api/status") {
+    const connected = Object.values(relayOpen).filter(Boolean).length;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ relaysConnected: connected, relaysTotal: RELAYS.length }));
     return;
   }
   res.writeHead(404).end();
