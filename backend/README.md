@@ -14,16 +14,21 @@ cd backend
 docker compose up -d --build
 ```
 
+`docker compose up -d` démarre **deux** conteneurs : `bitchat-backend` (agrégation + API,
+port 8787) et `bitchat-web` (sert les pages statiques `index.html`/`local.html`/
+`channel.html`, port 8734 — ne monte que ces 3 fichiers, pas tout le dossier `backend/`
+qui contient la base SQLite).
+
 Vérifier que ça tourne :
 ```bash
 curl http://127.0.0.1:8787/health
 docker compose logs -f
 ```
 
-Puis ouvrir `../local.html` (servi en statique, ex: `python3 -m http.server 8000` depuis le
-dossier parent `listener/`, puis `http://localhost:8000/local.html`). C'est la même
-interface que le dashboard GitHub Pages (`index.html`), mais elle se connecte à ce backend
-local au lieu des relais directement — avec en plus l'historique au chargement.
+Puis ouvrir **http://localhost:8734/local.html**. C'est la même interface que le dashboard
+GitHub Pages (`index.html`), mais elle se connecte à ce backend local au lieu des relais
+directement — avec en plus l'historique au chargement. Cliquer un message ouvre
+`channel.html`, l'historique complet + le direct de ce canal.
 
 ## Anonymat
 
@@ -36,9 +41,10 @@ local au lieu des relais directement — avec en plus l'historique au chargement
   ```yaml
   - TOR_PROXY=socks5h://host.docker.internal:9050
   ```
-  et relance (`docker compose up -d`). Sans ça, les opérateurs des ~10 relais voient ton IP
-  réelle se connecter en continu — ce qui est un signal "quelqu'un surveille ce flux en
-  permanence depuis cette IP", pas anodin si l'anonymat compte pour toi.
+  et relance (`docker compose up -d`). Sans ça, les opérateurs des ~330 relais (annuaire
+  officiel bitchat, voir `relays.json`) voient ton IP réelle se connecter en continu — ce
+  qui est un signal "quelqu'un surveille ce flux en permanence depuis cette IP", pas anodin
+  si l'anonymat compte pour toi.
 - **Pas de compte, pas de clé** : on ne fait que *lire* les relais (`REQ`), jamais publier —
   donc aucune identité Nostr n'est créée ni exposée.
 - **Liste d'origines autorisées** : le backend refuse les requêtes dont l'en-tête `Origin` ne
@@ -64,3 +70,4 @@ local au lieu des relais directement — avec en plus l'historique au chargement
 | `DB_PATH` | `./data/bitchat.db` | Fichier SQLite (monté en volume, persiste entre redémarrages) |
 | `ALLOWED_ORIGINS` | GitHub Pages + localhost | Origines autorisées à parler au backend |
 | `TOR_PROXY` | (vide) | Proxy SOCKS5 pour les connexions sortantes aux relais, ex `socks5h://host.docker.internal:9050` |
+| `RETENTION_DAYS` | `30` | Purge automatique (toutes les heures) des messages plus vieux que N jours |

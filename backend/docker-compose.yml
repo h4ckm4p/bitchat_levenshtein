@@ -17,3 +17,18 @@ services:
       # lui-même selon son whitepaper) : installe/lance Tor sur ta machine (port SOCKS
       # 9050 par défaut), puis décommente la ligne suivante.
       # - TOR_PROXY=socks5h://host.docker.internal:9050
+
+  bitchat-web:
+    image: python:3.12-alpine
+    container_name: bitchat-web
+    restart: unless-stopped
+    working_dir: /site
+    # on ne monte QUE les 3 pages, pas tout le dossier backend/ (qui contient la base
+    # SQLite) -- même en local-only, pas de raison de la rendre servable en statique.
+    volumes:
+      - ../index.html:/site/index.html:ro
+      - ../local.html:/site/local.html:ro
+      - ../channel.html:/site/channel.html:ro
+    ports:
+      - "127.0.0.1:8734:8000"
+    command: python3 -m http.server 8000
