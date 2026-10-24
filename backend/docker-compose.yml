@@ -1,0 +1,19 @@
+services:
+  bitchat-backend:
+    build: .
+    container_name: bitchat-backend
+    restart: unless-stopped
+    ports:
+      # IMPORTANT : "127.0.0.1:" devant le port garde ce service accessible uniquement
+      # depuis cette machine. Sans ce préfixe, Docker le publie sur 0.0.0.0 — accessible
+      # depuis tout le réseau local (et potentiellement internet selon ta box/pare-feu).
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=8787
+      - ALLOWED_ORIGINS=https://h4ckm4p.github.io,http://localhost,http://127.0.0.1
+      # Pour faire sortir les connexions aux relais via Tor (anonymat, comme bitchat
+      # lui-même selon son whitepaper) : installe/lance Tor sur ta machine (port SOCKS
+      # 9050 par défaut), puis décommente la ligne suivante.
+      # - TOR_PROXY=socks5h://host.docker.internal:9050
