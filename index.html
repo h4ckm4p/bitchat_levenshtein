@@ -72,14 +72,14 @@
   .msg { padding: 8px; margin-bottom: 6px; background: #1c1f23; border-radius: 8px; border: 1px solid #23262b; }
   .msg .meta { color: #8b98a5; font-size: 11px; margin-bottom: 3px; }
   .msg .meta .nick { color: #1d9bf0; }
-  .msg .content .hl { background: #1d9bf0; color: #0b0e11; border-radius: 3px; padding: 0 2px; font-weight: 700; }
+  .msg .content .hl { color: #0b0e11; border-radius: 3px; padding: 0 2px; font-weight: 700; }
   .msg .content { word-break: break-word; white-space: pre-wrap; }
   .empty { color: #5b6672; padding: 20px; text-align: center; font-size: 12px; }
 </style>
 </head>
 <body>
   <div id="toolbar">
-    <input type="text" id="termInput" placeholder="terme à surveiller…" />
+    <input type="text" id="termInput" placeholder="terme(s), ex: manif, manifestation" />
     <label>distance <input type="number" id="distInput" min="0" max="4" value="0" /></label>
     <button id="addBtn">+ Colonne</button>
     <div id="freshness" style="color:#8b98a5;font-size:12px;">aucun message reçu</div>
@@ -121,9 +121,15 @@ function levenshtein(a, b) {
   return prev[n];
 }
 
+// un terme peut être une combinaison "manif, manifestation, manifestants" -- chaque
+// alternative, séparée par une virgule, est évaluée indépendamment et combinée en OU.
+function splitTerms(term) {
+  return term.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 // shortcut: distance absolue, pas relative à la longueur du mot — au-delà de 2
 // sur un terme court (<6 lettres), le bruit (faux positifs) augmente vite.
-function matches(content, term, dist) {
+function matchesOne(content, term, dist) {
   const text = content.toLowerCase();
   const t = term.toLowerCase();
   if (dist <= 0) return text.includes(t);
@@ -131,24 +137,47 @@ function matches(content, term, dist) {
   return words.some((w) => levenshtein(w, t) <= dist);
 }
 
-// retrouve la position exacte du mot qui a fait matcher la colonne, pour le surligner
-// dans le message affiché -- mêmes règles que matches() (sous-chaîne à distance 0,
-// mot le plus proche en Levenshtein au-delà).
-function findHighlight(content, term, dist) {
+function matches(content, term, dist) {
+  return splitTerms(term).some((t) => matchesOne(content, t, dist));
+}
+
+// retrouve la position exacte du mot qui a fait matcher la colonne (+ sa distance réelle,
+// pour la couleur de surbrillance) -- mêmes règles que matches() (sous-chaîne = distance 0,
+// mot le plus proche en Levenshtein au-delà). Garde le meilleur candidat, pas le premier
+// trouvé, pour refléter la correspondance la plus proche réellement présente.
+function findHighlightOne(content, term, dist) {
   const lower = content.toLowerCase();
   const t = term.toLowerCase();
   if (dist <= 0) {
     const idx = lower.indexOf(t);
-    return idx === -1 ? null : { start: idx, end: idx + term.length };
+    return idx === -1 ? null : { start: idx, end: idx + term.length, distance: 0 };
   }
   const re = /[\p{L}\p{N}]+/gu;
-  let m;
+  let m, best = null;
   while ((m = re.exec(content))) {
-    if (levenshtein(m[0].toLowerCase(), t) <= dist) {
-      return { start: m.index, end: m.index + m[0].length };
+    const d = levenshtein(m[0].toLowerCase(), t);
+    if (d <= dist && (!best || d < best.distance)) {
+      best = { start: m.index, end: m.index + m[0].length, distance: d };
+      if (d === 0) break;
     }
   }
-  return null;
+  return best;
+}
+
+function findHighlight(content, term, dist) {
+  let best = null;
+  for (const t of splitTerms(term)) {
+    const hl = findHighlightOne(content, t, dist);
+    if (hl && (!best || hl.distance < best.distance)) best = hl;
+  }
+  return best;
+}
+
+// couleur de surbrillance par palier de distance : exact (bleu) -> de plus en plus
+// "éloigné" (jaune, orange, rouge) pour juger la confiance du match d'un coup d'œil.
+const DISTANCE_COLORS = ["#1d9bf0", "#f0b429", "#f0791d", "#f4212e"];
+function distanceColor(d) {
+  return DISTANCE_COLORS[Math.min(d, DISTANCE_COLORS.length - 1)];
 }
 
 function tag(ev, name) {
@@ -215,7 +244,7 @@ function createColumnEl(col) {
   el.draggable = true;
   el.innerHTML = `
     <div class="col-head">
-      <span class="term">${col.term}</span>
+      <span class="term" title="${col.term}">${col.term}</span>
       <span class="dist">dist ${col.dist}</span>
       <span class="count" id="count-${col.id}">0</span>
       <span class="close">✕</span>
@@ -346,6 +375,8 @@ function dispatchToColumn(ev, col) {
     contentDiv.append(shown.slice(0, hl.start));
     const mark = document.createElement("span");
     mark.className = "hl";
+    mark.style.background = distanceColor(hl.distance);
+    mark.title = `distance ${hl.distance}`;
     mark.textContent = shown.slice(hl.start, hl.end);
     contentDiv.appendChild(mark);
     contentDiv.append(shown.slice(hl.end));

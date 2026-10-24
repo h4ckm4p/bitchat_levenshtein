@@ -169,12 +169,17 @@ function levenshtein(a, b) {
   }
   return prev[n];
 }
-function matches(content, term, dist) {
+// un terme peut être une combinaison "manif, manifestation, manifestants" -- cohérent
+// avec le même mécanisme côté dashboard (index.html/local.html).
+function matchesOne(content, term, dist) {
   const text = (content || "").toLowerCase();
   const t = term.toLowerCase();
   if (dist <= 0) return text.includes(t);
   const words = text.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   return words.some((w) => levenshtein(w, t) <= dist);
+}
+function matches(content, term, dist) {
+  return term.split(",").map((s) => s.trim()).filter(Boolean).some((t) => matchesOne(content, t, dist));
 }
 
 function tagValue(ev, name) {

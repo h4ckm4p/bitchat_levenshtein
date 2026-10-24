@@ -99,7 +99,7 @@
 </head>
 <body>
   <div id="toolbar">
-    <input type="text" id="termInput" placeholder="terme à surveiller…" />
+    <input type="text" id="termInput" placeholder="terme(s), ex: manif, manifestation" />
     <label>distance <input type="number" id="distInput" min="0" max="4" value="0" /></label>
     <button id="addBtn">+ Colonne</button>
     <div id="freshness" style="color:#8b98a5;font-size:12px;">aucun message reçu</div>
@@ -149,9 +149,15 @@ function levenshtein(a, b) {
   return prev[n];
 }
 
+// un terme peut être une combinaison "manif, manifestation, manifestants" -- chaque
+// alternative, séparée par une virgule, est évaluée indépendamment et combinée en OU.
+function splitTerms(term) {
+  return term.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 // shortcut: distance absolue, pas relative à la longueur du mot — au-delà de 2
 // sur un terme court (<6 lettres), le bruit (faux positifs) augmente vite.
-function matches(content, term, dist) {
+function matchesOne(content, term, dist) {
   const text = content.toLowerCase();
   const t = term.toLowerCase();
   if (dist <= 0) return text.includes(t);
@@ -159,11 +165,15 @@ function matches(content, term, dist) {
   return words.some((w) => levenshtein(w, t) <= dist);
 }
 
+function matches(content, term, dist) {
+  return splitTerms(term).some((t) => matchesOne(content, t, dist));
+}
+
 // retrouve la position exacte du mot qui a fait matcher la colonne (+ sa distance réelle,
 // pour la couleur de surbrillance) -- mêmes règles que matches() (sous-chaîne = distance 0,
 // mot le plus proche en Levenshtein au-delà). Garde le meilleur candidat, pas le premier
 // trouvé, pour refléter la correspondance la plus proche réellement présente.
-function findHighlight(content, term, dist) {
+function findHighlightOne(content, term, dist) {
   const lower = content.toLowerCase();
   const t = term.toLowerCase();
   if (dist <= 0) {
@@ -178,6 +188,15 @@ function findHighlight(content, term, dist) {
       best = { start: m.index, end: m.index + m[0].length, distance: d };
       if (d === 0) break;
     }
+  }
+  return best;
+}
+
+function findHighlight(content, term, dist) {
+  let best = null;
+  for (const t of splitTerms(term)) {
+    const hl = findHighlightOne(content, t, dist);
+    if (hl && (!best || hl.distance < best.distance)) best = hl;
   }
   return best;
 }
@@ -237,7 +256,7 @@ function createColumnEl(col) {
   el.draggable = true;
   el.innerHTML = `
     <div class="col-head">
-      <span class="term">${col.term}</span>
+      <span class="term" title="${col.term}">${col.term}</span>
       <span class="dist">dist ${col.dist}</span>
       <span class="count" id="count-${col.id}">0</span>
       <span class="close">✕</span>
