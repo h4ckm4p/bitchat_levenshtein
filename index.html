@@ -87,6 +87,7 @@
     <label>distance <input type="number" id="blDistInput" min="0" max="4" value="0" /></label>
     <button id="blAddBtn">+ Liste noire</button>
     <div id="blChips"></div>
+    <div id="noiseCount" style="color:#8b98a5;font-size:12px;">0 bruit filtré</div>
     <div id="blockedCount">0 messages bloqués</div>
   </div>
   <div id="columns"></div>
@@ -129,6 +130,20 @@ function matches(content, term, dist) {
 
 function tag(ev, name) {
   return ev.tags.find((x) => x[0] === name)?.[1];
+}
+
+// shortcut: un message de chat humain n'est quasiment jamais du JSON valide avec un champ
+// "type" — heuristique simple pour écarter le bruit protocole d'autres apps (nearby-presence,
+// handshake, etc.) qui partagent les mêmes relais/kind que bitchat.
+function isNoise(content) {
+  const text = content.trim();
+  if (!text.startsWith("{")) return false;
+  try {
+    const obj = JSON.parse(text);
+    return typeof obj === "object" && obj !== null && typeof obj.type === "string";
+  } catch {
+    return false;
+  }
 }
 
 // --- état des colonnes ---
@@ -179,6 +194,7 @@ function addColumn(term, dist) {
 // --- liste noire (spam/trolls/insultes) : un message qui matche est exclu de toutes les colonnes ---
 let blacklist = JSON.parse(localStorage.getItem("bc_blacklist") || "[]");
 let blockedCount = 0;
+let noiseCount = 0;
 
 function saveBlacklist() {
   localStorage.setItem("bc_blacklist", JSON.stringify(blacklist));
@@ -235,8 +251,11 @@ function dispatchEvent(ev) {
   });
 }
 
-// --- connexion aux relais, avec reconnexion auto (un relais peut tomber/rate-limiter) ---
-const relayState = {}; // url -> { ws, open }
+// --- connexion aux relais, avec reconnexion à backoff (un relais mort ne doit pas être martelé) ---
+const relayState = {}; // url -> { ws, open, stableTimer }
+const relayAttempts = {}; // url -> nb d'échecs consécutifs
+const RECONNECT_DELAYS = [500, 1000, 2000, 5000, 15000, 60000, 300000]; // ms
+const STABLE_AFTER_MS = 60000; // connexion restée ouverte ce temps -> on réinitialise le backoff
 let lastMessageAt = null;
 
 function updateStatus() {
@@ -252,13 +271,22 @@ function updateFreshness() {
 }
 setInterval(updateFreshness, 1000);
 
+function scheduleReconnect(url) {
+  const attempt = relayAttempts[url] || 0;
+  const base = RECONNECT_DELAYS[Math.min(attempt, RECONNECT_DELAYS.length - 1)];
+  const delay = base * (0.75 + Math.random() * 0.5); // jitter ±25%
+  setTimeout(() => connectRelay(url), delay);
+}
+
 function connectRelay(url) {
   const ws = new WebSocket(url);
-  relayState[url] = { ws, open: false };
+  relayState[url] = { ws, open: false, stableTimer: null };
   ws.onopen = () => {
     relayState[url].open = true;
     updateStatus();
     ws.send(JSON.stringify(["REQ", "dash", { kinds: [20000] }]));
+    // reconnexion stable un moment -> on repart sur le délai le plus court la prochaine fois
+    relayState[url].stableTimer = setTimeout(() => { relayAttempts[url] = 0; }, STABLE_AFTER_MS);
   };
   ws.onmessage = (e) => {
     let msg;
@@ -268,6 +296,11 @@ function connectRelay(url) {
     lastMessageAt = Date.now();
     if (seenEventIds.has(ev.id)) return;
     seenEventIds.add(ev.id);
+    if (isNoise(ev.content ?? "")) {
+      noiseCount++;
+      document.getElementById("noiseCount").textContent = `${noiseCount} bruit filtré`;
+      return;
+    }
     recentEvents.push(ev);
     if (recentEvents.length > 300) recentEvents.shift();
     if (isBlacklisted(ev.content ?? "")) {
@@ -277,18 +310,22 @@ function connectRelay(url) {
     }
     dispatchEvent(ev);
   };
-  ws.onclose = () => { relayState[url].open = false; updateStatus(); };
-  ws.onerror = () => { relayState[url].open = false; updateStatus(); };
+  // shortcut: toute la logique de reconnexion vit dans onclose — un échec de connexion
+  // déclenche toujours onerror PUIS onclose dans les navigateurs, donc gérer les deux
+  // doublerait le compteur d'essais et programmerait deux reconnexions en parallèle.
+  ws.onerror = () => {};
+  ws.onclose = () => {
+    const state = relayState[url];
+    if (!state) return;
+    clearTimeout(state.stableTimer);
+    state.open = false;
+    updateStatus();
+    relayAttempts[url] = (relayAttempts[url] || 0) + 1;
+    scheduleReconnect(url);
+  };
 }
 
 RELAYS.forEach(connectRelay);
-
-// toutes les 30s : relance les relais qui ne sont plus ouverts (fermés ou jamais connectés)
-setInterval(() => {
-  RELAYS.forEach((url) => {
-    if (relayState[url]?.ws.readyState !== WebSocket.OPEN) connectRelay(url);
-  });
-}, 30000);
 
 document.getElementById("addBtn").onclick = () => {
   const term = document.getElementById("termInput").value;
