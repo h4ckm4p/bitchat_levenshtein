@@ -27,7 +27,9 @@ Tout message qui n'est pas du vrai chat humain est stocké (rien n'est supprimé
 - **Messages énormes** : plus de 3000 caractères — chunks de fichiers/images encodés qui circulent sur les mêmes relais que bitchat.
 - **JSON brut** : tout message qui est du JSON valide (ex. `{"type":"handshake",...}`) — trafic protocole d'autres applications partageant les mêmes relais Nostr, pas du chat.
 - **Spam "zalgo"** : plus de 30 % de caractères Unicode combinants (accents empilés qui cassent l'affichage).
-- **Flood de doublons** : le même message répété plusieurs fois sur un même canal par peu de comptes différents (ex. une pub bitcoin postée 76 fois par 3 pseudos).
+- **Flood de doublons** : au démarrage puis toutes les 10 minutes, un passage regroupe les messages par canal + contenu identique, et marque bruit tout groupe venant de peu de pseudos différents (≤3, ou un ratio répétitions/pseudos élevé — ex. une pub bitcoin postée 76 fois par 3 comptes). Une réaction courte tapée par coïncidence par plusieurs personnes différentes (ex. ".") n'est pas touchée : seuil minimum de 8 caractères.
+
+Comme le reste du bruit, un doublon détecté est **masqué, pas supprimé** — il reste en base jusqu'à la purge générale (30 jours).
 
 ## Démarrage
 
