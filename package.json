@@ -1,0 +1,16 @@
+{
+  "name": "bitchat-levenshtein",
+  "version": "1.0.0",
+  "description": "Filtre en direct les messages publics bitchat (canaux geohash Nostr) par terme, avec tolérance aux fautes de frappe (distance de Levenshtein). CLI (listen.mjs) + dashboard web multi-colonnes (dashboard.html, statique, déployable sur GitHub Pages).",
+  "main": "listen.mjs",
+  "scripts": {
+    "listen": "node listen.mjs"
+  },
+  "keywords": ["bitchat", "nostr", "levenshtein"],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}
