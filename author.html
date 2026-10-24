@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>bitchat — auteur</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: #15181c; color: #e7e9ea; font: 14px/1.4 -apple-system, "Segoe UI", sans-serif;
+  }
+  #header {
+    display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+    background: #1c1f23; border-bottom: 1px solid #2a2e33; flex-shrink: 0;
+  }
+  #header .nick { font-weight: 700; font-size: 16px; }
+  #header .count { color: #8b98a5; font-size: 13px; }
+  #header .live { margin-left: auto; color: #8b98a5; font-size: 12px; }
+  #messages { flex: 1; overflow-y: auto; padding: 10px; max-width: 760px; margin: 0 auto; width: 100%; }
+  .msg {
+    padding: 10px; margin-bottom: 8px; background: #1c1f23; border-radius: 8px; border: 1px solid #23262b;
+    cursor: pointer;
+  }
+  .msg:hover { border-color: #1d9bf0; }
+  .msg.target { background: #16304a; border-color: #1d9bf0; box-shadow: 0 0 0 1px #1d9bf0; }
+  .msg .meta { color: #8b98a5; font-size: 11px; margin-bottom: 4px; }
+  .msg .meta .geo { color: #5b6672; }
+  .msg .content { word-break: break-word; white-space: pre-wrap; }
+  .empty { color: #5b6672; padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+  <div id="header">
+    <span class="nick" id="hNick">…</span>
+    <span class="count" id="hCount"></span>
+    <span class="live" id="hLive">chargement…</span>
+  </div>
+  <div id="messages"><div class="empty">chargement de l'historique…</div></div>
+
+<script>
+const BACKEND = "http://127.0.0.1:8787";
+const params = new URLSearchParams(location.search);
+const pubkey = params.get("pubkey") || "";
+const targetId = params.get("id") || "";
+document.getElementById("hNick").textContent = params.get("nick") || (pubkey ? pubkey.slice(0, 12) : "?");
+
+function nickColor(nick) {
+  let hash = 0;
+  for (let i = 0; i < nick.length; i++) hash = (hash * 31 + nick.charCodeAt(i)) | 0;
+  return `hsl(${Math.abs(hash) % 360}, 70%, 65%)`;
+}
+
+function tag(ev, name) {
+  return ev.tags.find((x) => x[0] === name)?.[1];
+}
+
+function renderMsg(ev) {
+  const content = ev.content ?? "";
+  const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleString();
+  const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
+  const geohash = tag(ev, "g") || "?";
+  const div = document.createElement("div");
+  div.className = "msg";
+  div.dataset.id = ev.id;
+  if (ev.id === targetId) div.classList.add("target");
+  div.title = "Cliquer pour voir tout le canal";
+  div.onclick = () => window.open(`channel.html?g=${encodeURIComponent(geohash)}&id=${encodeURIComponent(ev.id)}&ts=${ev.received_at ?? ev.created_at}`, "_blank");
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.append(`[${time}] `);
+  const geoSpan = document.createElement("span");
+  geoSpan.className = "geo";
+  geoSpan.textContent = `#${geohash}`;
+  meta.appendChild(geoSpan);
+  if (ev.location) meta.append(` · ${ev.location}`);
+  if (tag(ev, "t") === "teleport") {
+    const tp = document.createElement("span");
+    tp.title = "Posté dans ce canal sans y être physiquement (tag bitchat officiel)";
+    tp.textContent = " 📡";
+    meta.appendChild(tp);
+  }
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "content";
+  contentDiv.textContent = content.length > 1500 ? content.slice(0, 1500) + "…" : content;
+  div.append(meta, contentDiv);
+  const root = document.getElementById("messages");
+  const empty = root.querySelector(".empty");
+  if (empty) empty.remove();
+  root.appendChild(div);
+  return div;
+}
+
+const seenIds = new Set();
+
+if (!pubkey) {
+  document.getElementById("messages").innerHTML = '<div class="empty">aucun auteur précisé (paramètre ?pubkey=)</div>';
+} else {
+  fetch(`${BACKEND}/api/author?pubkey=${encodeURIComponent(pubkey)}&limit=2000`)
+    .then((r) => r.json())
+    .then(({ messages }) => {
+      document.getElementById("hCount").textContent = `${messages.length} messages, tous canaux`;
+      document.getElementById("hLive").textContent = "historique chargé, écoute en direct…";
+      // couleur du pseudo cohérente avec les autres pages
+      const firstNick = messages[0] ? (tag(messages[0], "n") || messages[0].pubkey.slice(0, 8)) : null;
+      if (firstNick) document.getElementById("hNick").style.color = nickColor(firstNick);
+      // plus ancien en premier à l'écran (comme channel.html)
+      messages.slice().reverse().forEach((ev) => {
+        if (seenIds.has(ev.id)) return;
+        seenIds.add(ev.id);
+        renderMsg(ev);
+      });
+      const root = document.getElementById("messages");
+      const targetEl = targetId ? root.querySelector(`[data-id="${CSS.escape(targetId)}"]`) : null;
+      if (targetEl) targetEl.scrollIntoView({ block: "center" });
+      else root.scrollTop = root.scrollHeight;
+    })
+    .catch((e) => {
+      document.getElementById("hLive").textContent = "backend local injoignable";
+      console.error(e);
+    });
+
+  // écoute les nouveaux messages de cet auteur, tous canaux (filtrage côté page, le WS
+  // du backend diffuse tout -- pas de flux dédié par auteur côté serveur)
+  let attempts = 0;
+  const DELAYS = [500, 1000, 2000, 5000, 15000, 60000];
+  function connect() {
+    const ws = new WebSocket(BACKEND.replace(/^http/, "ws") + "/ws");
+    ws.onopen = () => { attempts = 0; };
+    ws.onmessage = (e) => {
+      let ev;
+      try { ev = JSON.parse(e.data); } catch { return; }
+      if (ev.pubkey !== pubkey) return;
+      if (seenIds.has(ev.id)) return;
+      seenIds.add(ev.id);
+      const root = document.getElementById("messages");
+      const atBottom = root.scrollTop + root.clientHeight >= root.scrollHeight - 40;
+      const el = renderMsg(ev);
+      if (atBottom) el.scrollIntoView({ block: "end" });
+    };
+    ws.onerror = () => {};
+    ws.onclose = () => {
+      document.getElementById("hLive").textContent = "déconnecté, reconnexion…";
+      const delay = DELAYS[Math.min(attempts, DELAYS.length - 1)];
+      attempts++;
+      setTimeout(connect, delay * (0.75 + Math.random() * 0.5));
+    };
+  }
+  connect();
+}
+</script>
+</body>
+</html>

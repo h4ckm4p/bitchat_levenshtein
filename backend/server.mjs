@@ -106,6 +106,7 @@ db.exec(`
     relay_origin TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at);
+  CREATE INDEX IF NOT EXISTS idx_events_pubkey ON events(pubkey);
 `);
 // migrations : colonnes ajoutées après la création initiale de la table
 const existingCols = db.prepare(`PRAGMA table_info(events)`).all().map((c) => c.name);
@@ -443,6 +444,21 @@ const server = createServer((req, res) => {
     }
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ geohash, label: describeGeohash(geohash), messages: rows.map(toClientShape) }));
+    return;
+  }
+  if (req.url.startsWith("/api/author")) {
+    // tous les messages d'un auteur, tous canaux confondus -- identifié par pubkey (pas
+    // le pseudo affiché, que plusieurs comptes différents peuvent partager).
+    const params = new URL(req.url, "http://x").searchParams;
+    const pubkey = params.get("pubkey");
+    if (!pubkey) { res.writeHead(400).end("paramètre pubkey requis"); return; }
+    const limit = Math.min(2000, Number(params.get("limit")) || 500);
+    const rows = db.prepare(`
+      SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+      WHERE is_noise = 0 AND pubkey = ? ORDER BY received_at DESC LIMIT ?
+    `).all(pubkey, limit);
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ pubkey, messages: rows.map(toClientShape) }));
     return;
   }
   if (req.url.startsWith("/api/search")) {

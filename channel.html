@@ -80,7 +80,12 @@ function renderMsg(ev, { prepend } = {}) {
   const nickSpan = document.createElement("span");
   nickSpan.className = "nick";
   nickSpan.style.color = nickColor(nick);
+  nickSpan.style.cursor = "pointer";
+  nickSpan.title = "Voir tous les messages de cet auteur, tous canaux";
   nickSpan.textContent = nick;
+  nickSpan.onclick = () => {
+    window.open(`author.html?pubkey=${encodeURIComponent(ev.pubkey)}&nick=${encodeURIComponent(nick)}`, "_blank");
+  };
   meta.appendChild(nickSpan);
   if (tag(ev, "t") === "teleport") {
     const tp = document.createElement("span");
