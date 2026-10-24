@@ -356,6 +356,22 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ geohash, label: describeGeohash(geohash), messages: rows }));
     return;
   }
+  if (req.url.startsWith("/api/search")) {
+    // backfill d'une colonne : cherche le terme dans TOUT l'historique retenu, pas
+    // seulement dans les N derniers messages génériques (sinon un terme peu fréquent,
+    // ex: le nom d'une ville précise, se retrouve noyé bien avant la fenêtre récente
+    // dès que la base grossit -- c'est exactement le bug observé en conditions réelles).
+    const params = new URL(req.url, "http://x").searchParams;
+    const term = params.get("term");
+    if (!term) { res.writeHead(400).end("paramètre term requis"); return; }
+    const dist = Number(params.get("dist")) || 0;
+    const limit = Math.min(5000, Number(params.get("limit")) || 2000);
+    const rows = exportAllStmt.all().filter((r) => matches(r.content, term, dist));
+    const recent = rows.slice(-limit).map(toClientShape); // exportAllStmt est trié du plus ancien au plus récent
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(recent));
+    return;
+  }
   if (req.url.startsWith("/api/export")) {
     // export des messages d'une RECHERCHE (terme + distance, comme une colonne du
     // dashboard), pas d'un geohash brut -- mêmes règles de correspondance qu'à l'écran.

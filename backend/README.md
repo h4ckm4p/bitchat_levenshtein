@@ -55,6 +55,11 @@ directement — avec en plus l'historique au chargement. Cliquer un message ouvr
 
 - Ne tourne que quand le conteneur tourne — pas un vrai "24/7" sauf si tu laisses ta machine
   allumée en continu.
+- **Après avoir modifié `index.html`/`local.html`/`channel.html`** (si tu code toi-même) :
+  `docker compose restart bitchat-web`. Le montage du fichier en lecture seule peut rester
+  bloqué sur une vue périmée du fichier (tronquée) après plusieurs écritures rapides sur
+  macOS/Docker Desktop — observé en conditions réelles (page qui ne faisait plus rien du
+  tout, sans erreur visible). Un simple redémarrage du conteneur suffit.
 - Utilisable uniquement depuis cette machine (le navigateur doit être sur le même poste que
   Docker) — pas partageable à distance en l'état.
 - Le proxy Tor n'a pas été testé en conditions réelles ici (pas de démon Tor disponible

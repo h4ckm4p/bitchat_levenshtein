@@ -267,12 +267,29 @@ function createColumnEl(col) {
   return el;
 }
 
+// backfill une colonne en cherchant son terme dans TOUT l'historique retenu côté
+// serveur (/api/search), pas seulement dans un lot récent générique -- sinon un terme
+// peu fréquent (ex: le nom d'une ville précise) se retrouve noyé dès que la base
+// grossit, alors même qu'il existe en base (bug observé en conditions réelles).
+async function backfillColumn(col) {
+  try {
+    const events = await fetch(
+      `${BACKEND}/api/search?term=${encodeURIComponent(col.term)}&dist=${col.dist}&limit=2000`
+    ).then((r) => r.json());
+    events.slice().reverse().forEach((ev) => {
+      if (!isBlacklisted(ev.content ?? "")) dispatchToColumn(ev, col);
+    });
+  } catch (e) {
+    console.error(`backfill colonne "${col.term}" impossible:`, e);
+  }
+}
+
 function renderColumns() {
   // rendu complet, seulement au chargement initial de la page
   const root = document.getElementById("columns");
   root.innerHTML = "";
   columns.forEach((col) => root.appendChild(createColumnEl(col)));
-  recentEvents.forEach((ev) => dispatchEvent(ev));
+  columns.forEach((col) => backfillColumn(col));
 }
 
 async function addColumn(term, dist) {
@@ -281,16 +298,8 @@ async function addColumn(term, dist) {
   columns.push(col);
   saveColumns();
   document.getElementById("columns").appendChild(createColumnEl(col));
-  // backfill depuis la base (pas juste le buffer mémoire de ~300 messages) — les autres
-  // colonnes ne sont pas touchées, seule celle-ci se peuple.
-  try {
-    const events = await fetch(`${BACKEND}/api/messages?limit=5000`).then((r) => r.json());
-    events.slice().reverse().forEach((ev) => {
-      if (!isBlacklisted(ev.content ?? "")) dispatchToColumn(ev, col);
-    });
-  } catch (e) {
-    console.error("backfill colonne impossible:", e);
-  }
+  // les autres colonnes ne sont pas touchées, seule celle-ci se peuple.
+  await backfillColumn(col);
 }
 
 function removeColumn(id) {
