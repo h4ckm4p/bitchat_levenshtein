@@ -76,6 +76,15 @@
     border-radius: 6px; cursor: pointer; font-weight: 600;
   }
   #storedCount { color: #8b98a5; font-size: 12px; margin-left: auto; }
+  #dbBar {
+    display: flex; gap: 8px; align-items: center; padding: 8px 14px;
+    background: #10151c; border-bottom: 1px solid #2a2e33; flex-shrink: 0;
+  }
+  #dbBar button {
+    background: #2a3a4a; border: none; color: white; padding: 7px 14px;
+    border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  #dbStatus { color: #8b98a5; font-size: 12px; }
   #columns { flex: 1; display: flex; overflow-x: auto; }
   .col {
     width: 320px; flex-shrink: 0; border-right: 1px solid #2a2e33;
@@ -100,7 +109,39 @@
   .msg .meta .loc { color: #5b6672; }
   .msg .content .hl { color: #0b0e11; border-radius: 3px; padding: 0 2px; font-weight: 700; }
   .msg .content { word-break: break-word; white-space: pre-wrap; }
+  .msg .content .masked-link {
+    color: #8b98a5; background: #0f1113; border: 1px solid #2a2e33; border-radius: 4px;
+    padding: 0 4px; cursor: pointer; word-break: break-all;
+  }
+  .msg .content .masked-link:hover { border-color: #1d9bf0; }
+  body.blur-on .msg .content { filter: blur(4px); transition: filter 0.1s; }
+  body.blur-on .msg .content:hover { filter: none; }
+  .msg .meta .star { cursor: pointer; margin-left: 2px; }
+  .msg .meta .star.kept { color: #f0b429; }
   .empty { color: #5b6672; padding: 20px; text-align: center; font-size: 12px; }
+  #keptPanel {
+    display: none; position: fixed; top: 0; right: 0; width: 380px; height: 100vh;
+    background: #1c1f23; border-left: 1px solid #2a2e33; z-index: 20; flex-direction: column;
+  }
+  #keptPanel.open { display: flex; }
+  #keptPanel .head {
+    padding: 10px 14px; border-bottom: 1px solid #2a2e33; display: flex; align-items: center; gap: 8px;
+  }
+  #keptPanel .head b { flex: 1; }
+  #keptPanel .head .close { cursor: pointer; color: #8b98a5; }
+  #keptList { flex: 1; overflow-y: auto; padding: 8px; }
+  #keptList .item { background: #15181c; border: 1px solid #2a2e33; border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+  #keptList .item .meta { color: #8b98a5; font-size: 11px; margin-bottom: 4px; }
+  #keptList .item .content { font-size: 13px; margin-bottom: 6px; white-space: pre-wrap; word-break: break-word; }
+  #keptList .item textarea {
+    width: 100%; background: #0f1113; border: 1px solid #2a2e33; color: #e7e9ea;
+    border-radius: 6px; padding: 6px; font: inherit; resize: vertical; min-height: 36px; box-sizing: border-box;
+  }
+  #keptList .item .row { display: flex; gap: 6px; margin-top: 6px; }
+  #keptList .item button {
+    background: #2a3a4a; border: none; color: white; padding: 4px 10px; border-radius: 6px;
+    cursor: pointer; font-size: 12px;
+  }
 </style>
 </head>
 <body>
@@ -113,6 +154,8 @@
     </div>
     <label>distance <input type="number" id="distInput" min="0" max="4" value="0" /></label>
     <button id="addBtn">+ Colonne</button>
+    <button id="blurToggle" type="button">🙈 Flouter</button>
+    <button id="keptToggle" type="button">⭐ Gardés</button>
     <div id="freshness" style="color:#8b98a5;font-size:12px;">aucun message reçu</div>
     <div id="nodeCount" style="color:#8b98a5;font-size:12px;">? nœuds connectés</div>
     <div id="status">connexion au backend local…</div>
@@ -144,7 +187,21 @@
     <button id="exportBtn">Exporter la recherche</button>
     <div id="storedCount">… messages stockés</div>
   </div>
+  <div id="dbBar">
+    <button id="dbExportBtn">⬇ Exporter toute la base</button>
+    <button id="dbImportBtn">⬆ Importer une base</button>
+    <input type="file" id="dbImportFile" accept=".db" style="display:none" />
+    <div id="dbStatus"></div>
+  </div>
   <div id="columns"></div>
+  <div id="keptPanel">
+    <div class="head">
+      <b>⭐ Messages gardés</b>
+      <a id="keptExportBtn" href="#" target="_blank" style="color:#8b98a5;font-size:12px;">exporter</a>
+      <span class="close" id="keptClose">✕</span>
+    </div>
+    <div id="keptList"></div>
+  </div>
 
 <script>
 // backend local (voir backend/README.md) — pas les relais Nostr directement : une seule
@@ -249,6 +306,152 @@ function nickColor(nick) {
   for (let i = 0; i < nick.length; i++) hash = (hash * 31 + nick.charCodeAt(i)) | 0;
   return `hsl(${Math.abs(hash) % 360}, 70%, 65%)`;
 }
+
+// masquage des liens : jamais un <a> cliquable, juste un texte "lien masqué" révélable au
+// clic -- évite qu'une URL de phishing/malveillante s'affiche de façon exploitable dans un
+// flux non modéré (même logique que BitWatch, bonne pratique OSINT standard).
+const LINK_RE = /(https?:\/\/\S+|www\.\S+)/gi;
+function buildMaskedLink(url) {
+  const span = document.createElement("span");
+  span.className = "masked-link";
+  span.textContent = "🔗 lien masqué";
+  span.title = "Cliquer pour afficher l'adresse (jamais ouverte automatiquement)";
+  let revealed = false;
+  span.onclick = (e) => {
+    e.stopPropagation();
+    revealed = !revealed;
+    span.textContent = revealed ? url : "🔗 lien masqué";
+  };
+  return span;
+}
+
+// construit le contenu d'un message : texte normal + liens masqués + surlignage de
+// recherche (term/dist optionnels), en fusionnant les deux types de plages de texte
+// spéciales pour éviter tout chevauchement (un lien masqué prend le pas sur le surlignage).
+function renderMessageContent(container, text, term, dist) {
+  const hl = term ? findHighlight(text, term, dist) : null;
+  const ranges = [];
+  LINK_RE.lastIndex = 0;
+  let m;
+  while ((m = LINK_RE.exec(text))) {
+    ranges.push({ start: m.index, end: m.index + m[0].length, kind: "link", url: m[0] });
+  }
+  if (hl && !ranges.some((r) => hl.start < r.end && hl.end > r.start)) {
+    ranges.push({ ...hl, kind: "hl" });
+  }
+  ranges.sort((a, b) => a.start - b.start);
+  let pos = 0;
+  for (const r of ranges) {
+    if (r.start > pos) container.append(text.slice(pos, r.start));
+    if (r.kind === "link") {
+      container.appendChild(buildMaskedLink(r.url));
+    } else {
+      const mark = document.createElement("span");
+      mark.className = "hl";
+      mark.style.background = distanceColor(r.distance);
+      mark.title = `distance ${r.distance}`;
+      mark.textContent = text.slice(r.start, r.end);
+      container.appendChild(mark);
+    }
+    pos = r.end;
+  }
+  if (pos < text.length) container.append(text.slice(pos));
+}
+
+// --- flou volontaire du contenu, persisté comme les autres réglages du dashboard ---
+const blurToggle = document.getElementById("blurToggle");
+function applyBlurPref() {
+  const on = localStorage.getItem("bc_blur_content") === "1";
+  document.body.classList.toggle("blur-on", on);
+  blurToggle.textContent = on ? "👁️ Afficher" : "🙈 Flouter";
+}
+blurToggle.onclick = () => {
+  const on = document.body.classList.toggle("blur-on");
+  localStorage.setItem("bc_blur_content", on ? "1" : "0");
+  blurToggle.textContent = on ? "👁️ Afficher" : "🙈 Flouter";
+};
+applyBlurPref();
+
+// --- messages "gardés" (⭐) : mis de côté pour un dossier précis, exclus de la purge
+// automatique côté serveur, avec une note libre -- voir /api/keep, /api/kept, backend/README.md ---
+function buildStar(ev) {
+  const star = document.createElement("span");
+  star.className = "star" + (ev.kept ? " kept" : "");
+  star.textContent = ev.kept ? "★" : "☆";
+  star.title = ev.kept ? "Retirer des messages gardés" : "Garder ce message (exclu de la purge auto)";
+  star.onclick = async (e) => {
+    e.stopPropagation();
+    const kept = star.classList.contains("kept");
+    if (kept) {
+      await fetch(`${BACKEND}/api/unkeep`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: ev.id }) });
+      star.classList.remove("kept");
+      star.textContent = "☆";
+      star.title = "Garder ce message (exclu de la purge auto)";
+    } else {
+      const note = prompt("Note (optionnelle) :", "") || "";
+      await fetch(`${BACKEND}/api/keep`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: ev.id, note }) });
+      star.classList.add("kept");
+      star.textContent = "★";
+      star.title = "Retirer des messages gardés";
+    }
+  };
+  return star;
+}
+
+async function loadKeptPanel() {
+  const list = document.getElementById("keptList");
+  list.innerHTML = '<div class="empty">chargement…</div>';
+  const kept = await fetch(`${BACKEND}/api/kept`).then((r) => r.json()).catch(() => []);
+  list.innerHTML = "";
+  if (!kept.length) { list.innerHTML = '<div class="empty">aucun message gardé</div>'; return; }
+  kept.forEach((ev) => {
+    const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
+    const geohash = tag(ev, "g") || "?";
+    const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleString();
+    const item = document.createElement("div");
+    item.className = "item";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `[${time}] #${geohash} · `;
+    const nickSpan = document.createElement("span");
+    nickSpan.style.color = nickColor(nick);
+    nickSpan.textContent = nick;
+    meta.appendChild(nickSpan);
+    const content = document.createElement("div");
+    content.className = "content";
+    content.textContent = ev.content;
+    content.style.cursor = "pointer";
+    content.title = "Cliquer pour voir tout le canal";
+    content.onclick = () => window.open(`channel.html?g=${encodeURIComponent(geohash)}&id=${encodeURIComponent(ev.id)}&ts=${ev.received_at ?? ev.created_at}`, "_blank");
+    const note = document.createElement("textarea");
+    note.placeholder = "note…";
+    note.value = ev.kept_note || "";
+    const row = document.createElement("div");
+    row.className = "row";
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "Enregistrer la note";
+    saveBtn.onclick = () => fetch(`${BACKEND}/api/keep`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: ev.id, note: note.value }) });
+    const removeBtn = document.createElement("button");
+    removeBtn.textContent = "Retirer";
+    removeBtn.onclick = async () => {
+      await fetch(`${BACKEND}/api/unkeep`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: ev.id }) });
+      loadKeptPanel();
+    };
+    row.append(saveBtn, removeBtn);
+    item.append(meta, content, note, row);
+    list.appendChild(item);
+  });
+}
+document.getElementById("keptExportBtn").onclick = (e) => {
+  e.preventDefault();
+  window.open(`${BACKEND}/api/export/kept`, "_blank");
+};
+document.getElementById("keptToggle").onclick = () => {
+  const panel = document.getElementById("keptPanel");
+  panel.classList.toggle("open");
+  if (panel.classList.contains("open")) loadKeptPanel();
+};
+document.getElementById("keptClose").onclick = () => document.getElementById("keptPanel").classList.remove("open");
 
 // --- état des colonnes ---
 // shortcut: id stable par colonne (pas l'index dans le tableau) — permet d'ajouter/retirer
@@ -433,6 +636,7 @@ function dispatchToColumn(ev, col) {
     window.open(`author.html?pubkey=${encodeURIComponent(ev.pubkey)}&nick=${encodeURIComponent(nick)}`, "_blank");
   };
   meta.appendChild(nickSpan);
+  meta.appendChild(buildStar(ev));
   if (tag(ev, "t") === "teleport") {
     const tp = document.createElement("span");
     tp.className = "teleport";
@@ -450,19 +654,7 @@ function dispatchToColumn(ev, col) {
   contentDiv.className = "content";
   // garde-fou d'affichage même si un message long passe entre les mailles du filtre
   const shown = content.length > 1500 ? content.slice(0, 1500) + "…" : content;
-  const hl = findHighlight(shown, col.term, col.dist);
-  if (hl) {
-    contentDiv.append(shown.slice(0, hl.start));
-    const mark = document.createElement("span");
-    mark.className = "hl";
-    mark.style.background = distanceColor(hl.distance);
-    mark.title = `distance ${hl.distance}`;
-    mark.textContent = shown.slice(hl.start, hl.end);
-    contentDiv.appendChild(mark);
-    contentDiv.append(shown.slice(hl.end));
-  } else {
-    contentDiv.textContent = shown;
-  }
+  renderMessageContent(contentDiv, shown, col.term, col.dist);
   div.append(meta, contentDiv);
   body.prepend(div);
   const countEl = document.getElementById(`count-${col.id}`);
@@ -471,7 +663,11 @@ function dispatchToColumn(ev, col) {
 
 function dispatchEvent(ev) {
   const content = ev.content ?? "";
-  if (isBlacklisted(content)) return;
+  if (isBlacklisted(content)) {
+    blockedCount++;
+    document.getElementById("blockedCount").textContent = `${blockedCount} messages bloqués`;
+    return;
+  }
   columns.forEach((col) => dispatchToColumn(ev, col));
 }
 
@@ -535,6 +731,34 @@ document.getElementById("exportBtn").onclick = () => {
   const format = document.getElementById("exportFormat").value;
   window.open(`${BACKEND}/api/export?term=${encodeURIComponent(term)}&dist=${dist}&format=${format}`, "_blank");
 };
+
+// export/import de TOUTE la base (fichier .db), pour partager l'historique collecté avec
+// quelqu'un d'autre -- distinct de "Exporter la recherche" ci-dessus qui ne prend que les
+// résultats filtrés. La config (colonnes/liste noire) n'est volontairement pas incluse,
+// elle vit dans localStorage : chaque personne garde ses propres règles de recherche.
+document.getElementById("dbExportBtn").onclick = () => {
+  window.open(`${BACKEND}/api/db/export`, "_blank");
+};
+document.getElementById("dbImportBtn").onclick = () => {
+  document.getElementById("dbImportFile").click();
+};
+document.getElementById("dbImportFile").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const status = document.getElementById("dbStatus");
+  status.textContent = `import de "${file.name}" en cours…`;
+  try {
+    const res = await fetch(`${BACKEND}/api/db/import`, { method: "POST", body: file });
+    if (!res.ok) throw new Error(await res.text());
+    const { added } = await res.json();
+    status.textContent = `${added} nouveaux messages importés (doublons ignorés)`;
+    updateStoredCount();
+  } catch (err) {
+    status.textContent = `échec de l'import : ${err.message}`;
+  } finally {
+    e.target.value = ""; // permet de réimporter le même fichier si besoin
+  }
+});
 
 fetch(`${BACKEND}/api/messages?limit=500`)
   .then((r) => r.json())

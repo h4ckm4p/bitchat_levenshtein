@@ -26,8 +26,23 @@
   .msg.target { background: #16304a; border-color: #1d9bf0; box-shadow: 0 0 0 1px #1d9bf0; }
   .msg .meta { color: #8b98a5; font-size: 11px; margin-bottom: 4px; }
   .msg .meta .geo { color: #5b6672; }
-  .msg .content { word-break: break-word; white-space: pre-wrap; }
+  .msg.other-account { border-left: 3px solid #e0a030; }
+  .msg .meta .other-account-tag { color: #e0a030; }
   .empty { color: #5b6672; padding: 30px; text-align: center; }
+  #warnBanner {
+    background: #3a2e12; color: #e0a030; padding: 8px 16px; font-size: 12px;
+    border-bottom: 1px solid #2a2e33; display: none;
+  }
+  .msg .content { word-break: break-word; white-space: pre-wrap; }
+  .msg .content .masked-link {
+    color: #8b98a5; background: #0f1113; border: 1px solid #2a2e33; border-radius: 4px;
+    padding: 0 4px; cursor: pointer; word-break: break-all;
+  }
+  .msg .content .masked-link:hover { border-color: #1d9bf0; }
+  body.blur-on .msg .content { filter: blur(4px); transition: filter 0.1s; }
+  body.blur-on .msg .content:hover { filter: none; }
+  .msg .meta .star { cursor: pointer; margin-left: 2px; }
+  .msg .meta .star.kept { color: #f0b429; }
 </style>
 </head>
 <body>
@@ -35,15 +50,18 @@
     <span class="nick" id="hNick">…</span>
     <span class="count" id="hCount"></span>
     <span class="live" id="hLive">chargement…</span>
+    <button id="blurToggle" type="button" style="background:#2a3a4a;border:none;color:white;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;">🙈 Flouter</button>
   </div>
+  <div id="warnBanner"></div>
   <div id="messages"><div class="empty">chargement de l'historique…</div></div>
 
 <script>
 const BACKEND = "http://127.0.0.1:8787";
 const params = new URLSearchParams(location.search);
 const pubkey = params.get("pubkey") || "";
+const nick = params.get("nick") || "";
 const targetId = params.get("id") || "";
-document.getElementById("hNick").textContent = params.get("nick") || (pubkey ? pubkey.slice(0, 12) : "?");
+document.getElementById("hNick").textContent = nick || (pubkey ? pubkey.slice(0, 12) : "?");
 
 function nickColor(nick) {
   let hash = 0;
@@ -55,13 +73,76 @@ function tag(ev, name) {
   return ev.tags.find((x) => x[0] === name)?.[1];
 }
 
+// masquage des liens : jamais un <a> cliquable, juste un texte "lien masqué" révélable au
+// clic -- évite qu'une URL de phishing/malveillante s'affiche de façon exploitable.
+const LINK_RE = /(https?:\/\/\S+|www\.\S+)/gi;
+function buildMaskedLink(url) {
+  const span = document.createElement("span");
+  span.className = "masked-link";
+  span.textContent = "🔗 lien masqué";
+  span.title = "Cliquer pour afficher l'adresse (jamais ouverte automatiquement)";
+  let revealed = false;
+  span.onclick = (e) => {
+    e.stopPropagation();
+    revealed = !revealed;
+    span.textContent = revealed ? url : "🔗 lien masqué";
+  };
+  return span;
+}
+function renderMessageContent(container, text) {
+  LINK_RE.lastIndex = 0;
+  let pos = 0, m;
+  while ((m = LINK_RE.exec(text))) {
+    if (m.index > pos) container.append(text.slice(pos, m.index));
+    container.appendChild(buildMaskedLink(m[0]));
+    pos = m.index + m[0].length;
+  }
+  if (pos < text.length) container.append(text.slice(pos));
+}
+
+const blurToggle = document.getElementById("blurToggle");
+function applyBlurPref() {
+  const on = localStorage.getItem("bc_blur_content") === "1";
+  document.body.classList.toggle("blur-on", on);
+  blurToggle.textContent = on ? "👁️ Afficher" : "🙈 Flouter";
+}
+blurToggle.onclick = () => {
+  const on = document.body.classList.toggle("blur-on");
+  localStorage.setItem("bc_blur_content", on ? "1" : "0");
+  blurToggle.textContent = on ? "👁️ Afficher" : "🙈 Flouter";
+};
+applyBlurPref();
+
+function buildStar(ev) {
+  const star = document.createElement("span");
+  star.className = "star" + (ev.kept ? " kept" : "");
+  star.textContent = ev.kept ? "★" : "☆";
+  star.title = ev.kept ? "Retirer des messages gardés" : "Garder ce message (exclu de la purge auto)";
+  star.onclick = async (e) => {
+    e.stopPropagation();
+    const kept = star.classList.contains("kept");
+    if (kept) {
+      await fetch(`${BACKEND}/api/unkeep`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: ev.id }) });
+      star.classList.remove("kept"); star.textContent = "☆";
+      star.title = "Garder ce message (exclu de la purge auto)";
+    } else {
+      const note = prompt("Note (optionnelle) :", "") || "";
+      await fetch(`${BACKEND}/api/keep`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: ev.id, note }) });
+      star.classList.add("kept"); star.textContent = "★";
+      star.title = "Retirer des messages gardés";
+    }
+  };
+  return star;
+}
+
 function renderMsg(ev) {
   const content = ev.content ?? "";
   const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleString();
-  const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
+  const evNick = tag(ev, "n") || ev.pubkey.slice(0, 8);
   const geohash = tag(ev, "g") || "?";
+  const isOtherAccount = ev.pubkey !== pubkey;
   const div = document.createElement("div");
-  div.className = "msg";
+  div.className = "msg" + (isOtherAccount ? " other-account" : "");
   div.dataset.id = ev.id;
   if (ev.id === targetId) div.classList.add("target");
   div.title = "Cliquer pour voir tout le canal";
@@ -74,6 +155,14 @@ function renderMsg(ev) {
   geoSpan.textContent = `#${geohash}`;
   meta.appendChild(geoSpan);
   if (ev.location) meta.append(` · ${ev.location}`);
+  meta.appendChild(buildStar(ev));
+  if (isOtherAccount) {
+    const tagEl = document.createElement("span");
+    tagEl.className = "other-account-tag";
+    tagEl.title = `Même pseudo "${evNick}" mais compte Nostr différent (pubkey ${ev.pubkey.slice(0, 12)}…) — bitchat n'a pas d'identité vérifiée, ce n'est pas forcément la même personne.`;
+    tagEl.textContent = " ⚠ autre compte, même pseudo";
+    meta.appendChild(tagEl);
+  }
   if (tag(ev, "t") === "teleport") {
     const tp = document.createElement("span");
     tp.title = "Posté dans ce canal sans y être physiquement (tag bitchat officiel)";
@@ -82,7 +171,8 @@ function renderMsg(ev) {
   }
   const contentDiv = document.createElement("div");
   contentDiv.className = "content";
-  contentDiv.textContent = content.length > 1500 ? content.slice(0, 1500) + "…" : content;
+  const shown = content.length > 1500 ? content.slice(0, 1500) + "…" : content;
+  renderMessageContent(contentDiv, shown);
   div.append(meta, contentDiv);
   const root = document.getElementById("messages");
   const empty = root.querySelector(".empty");
@@ -96,16 +186,24 @@ const seenIds = new Set();
 if (!pubkey) {
   document.getElementById("messages").innerHTML = '<div class="empty">aucun auteur précisé (paramètre ?pubkey=)</div>';
 } else {
-  fetch(`${BACKEND}/api/author?pubkey=${encodeURIComponent(pubkey)}&limit=2000`)
+  fetch(`${BACKEND}/api/author?pubkey=${encodeURIComponent(pubkey)}&nickname=${encodeURIComponent(nick)}&limit=2000`)
     .then((r) => r.json())
-    .then(({ messages }) => {
+    .then(({ messages, samePseudoOtherAccounts }) => {
       document.getElementById("hCount").textContent = `${messages.length} messages, tous canaux`;
       document.getElementById("hLive").textContent = "historique chargé, écoute en direct…";
+      if (samePseudoOtherAccounts && samePseudoOtherAccounts.length > 0) {
+        const banner = document.getElementById("warnBanner");
+        banner.style.display = "block";
+        banner.textContent = `⚠ ${samePseudoOtherAccounts.length} message(s) d'un ou plusieurs autres comptes ayant affiché le même pseudo "${nick}" (repérés ci-dessous) — bitchat n'a pas d'identité vérifiée, un pseudo ne prouve pas que c'est la même personne.`;
+      }
       // couleur du pseudo cohérente avec les autres pages
       const firstNick = messages[0] ? (tag(messages[0], "n") || messages[0].pubkey.slice(0, 8)) : null;
       if (firstNick) document.getElementById("hNick").style.color = nickColor(firstNick);
-      // plus ancien en premier à l'écran (comme channel.html)
-      messages.slice().reverse().forEach((ev) => {
+      // fusion des deux groupes, plus ancien en premier à l'écran (comme channel.html) --
+      // les messages d'autres comptes restent distingués visuellement (bordure + badge)
+      const all = [...messages, ...(samePseudoOtherAccounts || [])]
+        .sort((a, b) => (a.received_at ?? a.created_at) - (b.received_at ?? b.created_at));
+      all.forEach((ev) => {
         if (seenIds.has(ev.id)) return;
         seenIds.add(ev.id);
         renderMsg(ev);
@@ -130,7 +228,7 @@ if (!pubkey) {
     ws.onmessage = (e) => {
       let ev;
       try { ev = JSON.parse(e.data); } catch { return; }
-      if (ev.pubkey !== pubkey) return;
+      if (ev.pubkey !== pubkey && tag(ev, "n") !== nick) return;
       if (seenIds.has(ev.id)) return;
       seenIds.add(ev.id);
       const root = document.getElementById("messages");

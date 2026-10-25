@@ -5,6 +5,15 @@ chaque navigateur ouvre ses propres connexions, garde un **historique persistant
 les events bitchat sont éphémères côté relais, rien n'est stocké sans ça), et filtre déjà
 le bruit protocole (`nearby-presence`/`handshake` d'autres apps) avant de servir les données.
 
+**Filtre à la source** : le kind Nostr `20000` utilisé par bitchat n'est pas réservé à
+bitchat — c'est la plage "éphémère" générique de NIP-01 (`20000<=kind<30000`), confirmé
+dans le code officiel (`NostrProtocol.kt`, commentaire *"ephemeral public message (kind
+20000)"*), que n'importe quelle appli Nostr peut réutiliser. Sans tag `g` (geohash) valide
+(alphabet base32 standard, 1-8 caractères — cf. `GeohashChannelLevel` du client Android),
+un événement n'est pas un message bitchat et n'est **pas stocké du tout** (`filters.mjs`,
+`GEOHASH_RE`) — ça écartait avant ce correctif près de 50% du volume ingéré (trafic d'autres
+applis partageant le même kind, ou tag `g` en texte libre).
+
 Pensé pour tourner **en local uniquement** — pas un service à exposer publiquement.
 
 ## Démarrer
@@ -15,8 +24,8 @@ docker compose up -d --build
 ```
 
 `docker compose up -d` démarre **deux** conteneurs : `bitchat-backend` (agrégation + API,
-port 8787) et `bitchat-web` (sert les pages statiques `local.html`/`channel.html`, port
-8734 — ne monte que ces 2 fichiers, pas tout le dossier `backend/` qui contient la base
+port 8787) et `bitchat-web` (sert les pages statiques `local.html`/`channel.html`/`author.html`,
+port 8734 — ne monte que ces 3 fichiers, pas tout le dossier `backend/` qui contient la base
 SQLite).
 
 Vérifier que ça tourne :
@@ -53,7 +62,7 @@ l'historique complet + le direct de ce canal.
 
 - Ne tourne que quand le conteneur tourne — pas un vrai "24/7" sauf si tu laisses ta machine
   allumée en continu.
-- **Après avoir modifié `local.html`/`channel.html`** (si tu code toi-même) :
+- **Après avoir modifié `local.html`/`channel.html`/`author.html`** (si tu code toi-même) :
   `docker compose restart bitchat-web`. Le montage du fichier en lecture seule peut rester
   bloqué sur une vue périmée du fichier (tronquée) après plusieurs écritures rapides sur
   macOS/Docker Desktop — observé en conditions réelles (page qui ne faisait plus rien du
@@ -74,3 +83,31 @@ l'historique complet + le direct de ce canal.
 | `ALLOWED_ORIGINS` | localhost | Origines autorisées à parler au backend |
 | `TOR_PROXY` | (vide) | Proxy SOCKS5 pour les connexions sortantes aux relais, ex `socks5h://host.docker.internal:9050` |
 | `RETENTION_DAYS` | `30` | Purge automatique (toutes les heures) des messages plus vieux que N jours |
+
+## Vérification cryptographique et tests
+
+Chaque événement reçu d'un relais est revérifié avant stockage (`filters.mjs`,
+`isValidSignedEvent`) : l'id NIP-01 est recalculé et la signature schnorr (BIP-340, via
+`@noble/curves`) est vérifiée. Un événement dont l'id ou la signature ne correspond pas est
+rejeté silencieusement (compteur `invalidSignatureCount` exposé dans `GET /api/status`).
+
+Les fonctions pures (filtre de bruit, filtre geohash, recherche ET/OU, vérification de
+signature) vivent dans `backend/filters.mjs`, testées isolément (`node:test`, aucun accès
+réseau/DB) :
+
+```sh
+npm test
+```
+
+Endpoints "messages gardés" (⭐, voir README racine) : `POST /api/keep` (`{id, note}`),
+`POST /api/unkeep` (`{id}`), `GET /api/kept`, `GET /api/export/kept?format=json|csv`.
+
+## Partager la base avec quelqu'un d'autre
+
+`GET /api/db/export` renvoie un instantané cohérent de toute la base (`VACUUM INTO` — fusionne
+le WAL, pas de risque de copier une écriture à moitié faite), accessible directement depuis
+le bouton "⬇ Exporter toute la base" du dashboard. `POST /api/db/import` (bouton "⬆ Importer
+une base") fusionne un fichier `.db` reçu : `INSERT OR IGNORE` sur l'id, donc **non-destructif**
+— ça n'ajoute que les messages absents de ta base actuelle, n'écrase et ne supprime jamais
+rien. La config (colonnes, liste noire) n'est pas incluse, elle vit dans le navigateur de
+chacun.

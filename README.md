@@ -12,10 +12,15 @@ Tourne en local via Docker : un backend agrège 330 relais (annuaire officiel bi
 - **Glisser-déposer** pour réordonner les colonnes, sans perdre leur contenu.
 - **Couleur stable par pseudo** et mot surligné dans chaque message, coloré selon la distance de correspondance (bleu = exact → rouge = distance 3+).
 - **Badge 📡 "téléporté"** : signale un message posté dans un canal geohash sans y être physiquement (tag officiel bitchat).
-- **Lieu décodé du geohash** (ville la plus proche, hors-ligne — aucun appel à un service de géocodage externe).
+- **Lieu décodé du geohash** (ville la plus proche, hors-ligne — aucun appel à un service de géocodage externe). Sur les cellules très larges (geohash de 1-3 caractères, jusqu'à 5000km de côté), aucune ville n'est affichée — une "proximité" à cette échelle serait trompeuse, juste le niveau de précision (région/zone) est indiqué.
 - **Historique interrogeable** : une colonne ajoutée cherche dans toute la base retenue, pas seulement les derniers messages.
-- **Clic sur un message** → ouvre `channel.html`, centré et surligné sur ce message, avec tout l'historique du canal autour.
+- **Clic sur un message** → ouvre `channel.html`, centré et surligné sur ce message, avec tout l'historique du canal autour ; les autres messages du même auteur y sont mis en avant.
+- **Clic sur un pseudo** → ouvre `author.html`, tous les messages de cet auteur (identifié par pubkey, pas le pseudo affiché), tous canaux confondus — avec en plus les messages d'autres comptes (pubkeys différentes) ayant affiché le même pseudo, clairement distingués (bordure + avertissement) puisqu'un pseudo bitchat n'est pas une identité vérifiée.
 - **Export** (JSON/CSV) d'une recherche (terme + distance + ET/OU).
+- **Export/import de toute la base** (fichier `.db`) pour partager l'historique collecté avec quelqu'un d'autre. Import non-destructif (fusion par id, les doublons sont ignorés, rien n'est jamais écrasé) ; la config (colonnes, liste noire) n'est pas incluse — elle vit dans le navigateur, chaque personne garde ses propres règles.
+- **Vérification cryptographique** : chaque événement reçu est revérifié (id NIP-01 recalculé, signature schnorr/BIP-340) avant stockage — un événement falsifié ou altéré en transit est rejeté, pas stocké.
+- **Liens masqués** dans les messages (`🔗 lien masqué`, révélable au clic, jamais un lien cliquable ni ouvert automatiquement), et un bouton "Flouter" pour flouter tout le contenu jusqu'au survol.
+- **Messages "gardés"** (⭐ sur un message) : mis de côté avec une note libre, exclus de la purge automatique, exportables à part — pour constituer un dossier sur un cas précis.
 - **Nettoyage anti-spam automatique** (voir détail ci-dessous).
 - **Purge automatique** après 30 jours (réglable).
 
@@ -38,9 +43,23 @@ cd backend
 docker compose up -d --build
 ```
 
-Démarre deux conteneurs : `bitchat-backend` (agrégation des relais + API + base SQLite, port `127.0.0.1:8787`) et `bitchat-web` (sert `local.html`/`channel.html`, port `127.0.0.1:8734` — ne monte que ces 2 fichiers, jamais la base). Puis ouvrir **http://localhost:8734/local.html**.
+Démarre deux conteneurs : `bitchat-backend` (agrégation des relais + API + base SQLite, port `127.0.0.1:8787`) et `bitchat-web` (sert `local.html`/`channel.html`/`author.html`, port `127.0.0.1:8734` — ne monte que ces 3 fichiers, jamais la base). Puis ouvrir **http://localhost:8734/local.html**.
 
 Détails complets (anonymat, variables d'environnement, limites, Tor) : [`backend/README.md`](backend/README.md).
+
+## Cadre légal et éthique
+
+Les messages bitchat observés ici sont publics, mais restent des **données personnelles** :
+pseudonymes, contenus, localisation approximative (geohash). Avant tout usage :
+
+- avoir une finalité légitime claire pour cette veille ;
+- régler `RETENTION_DAYS` (voir `docker-compose.yml`) au strict nécessaire, et purger plus
+  tôt si le besoin disparaît ;
+- limiter l'accès à cette instance et à ses exports — le backend n'écoute que sur
+  `127.0.0.1`, mais rien n'empêche quelqu'un d'exporter puis de diffuser largement ;
+- ne jamais republier de contenu identifiant extrait d'ici sans réflexion préalable ;
+- garder en tête que le flux brut, non modéré, peut contenir des contenus choquants ou
+  illicites — d'où le masquage des liens et l'option de flou du contenu.
 
 ## CLI (`listen.mjs`)
 

