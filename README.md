@@ -47,6 +47,28 @@ Démarre deux conteneurs : `bitchat-backend` (agrégation des relais + API + bas
 
 Détails complets (anonymat, variables d'environnement, limites, Tor) : [`backend/README.md`](backend/README.md).
 
+### Arrêter / relancer
+
+```bash
+cd backend
+docker compose stop        # arrête la collecte, garde les conteneurs (redémarrage rapide)
+docker compose start       # relance tel quel, sans rebuild -- la base est intacte
+```
+
+Pas besoin de refaire `docker compose up -d --build` sauf si le code (`server.mjs`,
+`filters.mjs`, `local.html`...) a changé depuis — dans ce cas uniquement :
+
+```bash
+docker compose up -d --build
+```
+
+Vérifier que ça tourne : `docker compose ps` (les deux conteneurs doivent être `Up`) ou
+`curl http://127.0.0.1:8787/health` (répond `ok`).
+
+Si tu avais lancé `caffeinate` pour empêcher la mise en veille pendant la collecte (utile
+pour une veille longue durée), pense à l'arrêter aussi quand tu arrêtes la collecte
+(`pkill caffeinate`, ou juste fermer le terminal qui le fait tourner).
+
 ## Cadre légal et éthique
 
 Les messages bitchat observés ici sont publics, mais restent des **données personnelles** :
