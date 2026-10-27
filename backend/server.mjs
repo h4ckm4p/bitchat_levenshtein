@@ -257,6 +257,11 @@ const RECONNECT_DELAYS = [500, 1000, 2000, 5000, 15000, 60000, 300000];
 const STABLE_AFTER_MS = 60000;
 const seenIds = new Set();
 let invalidSignatureCount = 0; // visible via /api/status
+// fixé une fois au démarrage, pas recalculé à chaque appel -- un relais instable qui se
+// reconnecte toutes les 30s avec "since: maintenant" perdrait tout message publié pendant
+// le trou de connexion ; dédupliqué par seenIds/INSERT OR IGNORE, le re-recouvrement ne
+// crée jamais de doublon.
+const SESSION_START_TS = Math.floor(Date.now() / 1000);
 
 function scheduleReconnect(url) {
   const attempt = relayAttempts[url] || 0;
@@ -274,7 +279,9 @@ function connectRelay(url) {
   ws.on("open", () => {
     relayOpen[url] = true;
     console.log(`[${url}] connecté${TOR_PROXY ? " (via Tor)" : ""}`);
-    ws.send(JSON.stringify(["REQ", "ingest", { kinds: [20000] }]));
+    // sans "since" un relais renvoie son backlog d'events passés à chaque (re)connexion,
+    // qu'on stockerait comme si c'était du direct.
+    ws.send(JSON.stringify(["REQ", "ingest", { kinds: [20000], since: SESSION_START_TS }]));
     stableTimer = setTimeout(() => { relayAttempts[url] = 0; }, STABLE_AFTER_MS);
   });
 

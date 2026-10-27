@@ -300,6 +300,15 @@ function tag(ev, name) {
   return ev.tags.find((x) => x[0] === name)?.[1];
 }
 
+// pseudo illisible (espaces/caractères invisibles uniquement, ex: U+2060 WORD JOINER --
+// astuce de bot pour échapper aux filtres basés sur le pseudo) -> on retombe sur le pubkey,
+// sinon impossible de suivre "qui parle" dans une conversation.
+function visibleNick(ev) {
+  const raw = tag(ev, "n") || "";
+  const stripped = raw.replace(/[\p{Cf}\p{Mn}\p{Zs}\s]/gu, "");
+  return stripped ? raw : ev.pubkey.slice(0, 8);
+}
+
 // couleur stable par pseudo : hash du nom -> teinte HSL (même pseudo = toujours la même couleur)
 function nickColor(nick) {
   let hash = 0;
@@ -405,7 +414,7 @@ async function loadKeptPanel() {
   list.innerHTML = "";
   if (!kept.length) { list.innerHTML = '<div class="empty">aucun message gardé</div>'; return; }
   kept.forEach((ev) => {
-    const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
+    const nick = visibleNick(ev);
     const geohash = tag(ev, "g") || "?";
     const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleString();
     const item = document.createElement("div");
@@ -613,7 +622,7 @@ function dispatchToColumn(ev, col) {
   // fiable : fuseau horaire ou horloge locale mal réglée côté client bitchat peuvent
   // faire apparaître un message avant des messages en réalité plus anciens).
   const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleTimeString();
-  const nick = tag(ev, "n") || ev.pubkey.slice(0, 8);
+  const nick = visibleNick(ev);
   const geohash = tag(ev, "g") || "?";
 
   // shortcut: nick/geohash/lieu viennent du réseau (non fiables) -> construits via

@@ -73,6 +73,15 @@ function tag(ev, name) {
   return ev.tags.find((x) => x[0] === name)?.[1];
 }
 
+// pseudo illisible (espaces/caractères invisibles uniquement, ex: U+2060 WORD JOINER --
+// astuce de bot pour échapper aux filtres basés sur le pseudo) -> on retombe sur le pubkey,
+// sinon impossible de suivre "qui parle" dans une conversation.
+function visibleNick(ev) {
+  const raw = tag(ev, "n") || "";
+  const stripped = raw.replace(/[\p{Cf}\p{Mn}\p{Zs}\s]/gu, "");
+  return stripped ? raw : ev.pubkey.slice(0, 8);
+}
+
 // masquage des liens : jamais un <a> cliquable, juste un texte "lien masqué" révélable au
 // clic -- évite qu'une URL de phishing/malveillante s'affiche de façon exploitable.
 const LINK_RE = /(https?:\/\/\S+|www\.\S+)/gi;
@@ -138,7 +147,7 @@ function buildStar(ev) {
 function renderMsg(ev) {
   const content = ev.content ?? "";
   const time = new Date((ev.received_at ?? ev.created_at) * 1000).toLocaleString();
-  const evNick = tag(ev, "n") || ev.pubkey.slice(0, 8);
+  const evNick = visibleNick(ev);
   const geohash = tag(ev, "g") || "?";
   const isOtherAccount = ev.pubkey !== pubkey;
   const div = document.createElement("div");
