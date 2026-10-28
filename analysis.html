@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>bitchat — analyse</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #15181c; color: #e7e9ea;
+    font: 14px/1.4 -apple-system, "Segoe UI", sans-serif;
+  }
+  #header {
+    display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+    background: #1c1f23; border-bottom: 1px solid #2a2e33; position: sticky; top: 0;
+  }
+  #header b { font-size: 16px; }
+  #header .live { margin-left: auto; color: #8b98a5; font-size: 12px; }
+  #header button {
+    background: #2a3a4a; border: none; color: white; padding: 6px 12px;
+    border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  #body { max-width: 900px; margin: 0 auto; padding: 16px; }
+  .kpi-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+  .kpi {
+    background: #1c1f23; border: 1px solid #2a2e33; border-radius: 8px;
+    padding: 10px 14px; min-width: 150px; flex: 1;
+  }
+  .kpi .n { font-size: 20px; font-weight: 700; }
+  .kpi .label { color: #8b98a5; font-size: 11px; }
+  section { margin-bottom: 28px; }
+  section h3 {
+    margin: 0 0 10px; font-size: 12px; color: #8b98a5;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 12px; }
+  .bar-label {
+    width: 170px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: #e7e9ea;
+  }
+  .bar-track {
+    flex: 1; background: #0f1113; border: 1px solid #2a2e33; border-radius: 4px;
+    height: 14px; overflow: hidden;
+  }
+  .bar-fill { height: 100%; background: #1d9bf0; }
+  .bar-value { width: 90px; flex-shrink: 0; text-align: right; color: #8b98a5; }
+  .empty { color: #5b6672; padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+  <div id="header">
+    <b>📊 Analyse</b>
+    <span class="live" id="hLive">chargement…</span>
+    <button id="refreshBtn" type="button">🔄 Rafraîchir</button>
+  </div>
+  <div id="body"><div class="empty">chargement…</div></div>
+
+<script>
+// backend local (voir backend/README.md) -- agrégats recalculés à la demande, pas un flux
+// WebSocket comme channel.html/author.html : recalculer des GROUP BY sur toute la table à
+// chaque message serait inutilement coûteux, un bouton "rafraîchir" suffit ici.
+const BACKEND = "http://127.0.0.1:8787";
+
+function pct(n, total) {
+  return total > 0 ? `${Math.round((n / total) * 100)}%` : "0%";
+}
+
+// une ligne label + barre proportionnelle + valeur exacte -- graphique et donnée tabulaire
+// dans un seul composant, réutilisé pour tous les classements de cette page.
+function renderBarRow(container, label, value, maxValue, formatValue) {
+  const row = document.createElement("div");
+  row.className = "bar-row";
+  const labelEl = document.createElement("span");
+  labelEl.className = "bar-label";
+  labelEl.textContent = label;
+  labelEl.title = label;
+  const track = document.createElement("div");
+  track.className = "bar-track";
+  const fill = document.createElement("div");
+  fill.className = "bar-fill";
+  fill.style.width = maxValue > 0 ? `${Math.max(1, (value / maxValue) * 100)}%` : "0%";
+  track.appendChild(fill);
+  const valueEl = document.createElement("span");
+  valueEl.className = "bar-value";
+  valueEl.textContent = formatValue ? formatValue(value) : String(value);
+  row.append(labelEl, track, valueEl);
+  container.appendChild(row);
+}
+
+function kpiTile(n, label) {
+  const div = document.createElement("div");
+  div.className = "kpi";
+  div.innerHTML = `<div class="n"></div><div class="label"></div>`;
+  div.querySelector(".n").textContent = n;
+  div.querySelector(".label").textContent = label;
+  return div;
+}
+
+function section(title) {
+  const sec = document.createElement("section");
+  const h = document.createElement("h3");
+  h.textContent = title;
+  sec.appendChild(h);
+  return sec;
+}
+
+function barSection(title, rows, body) {
+  const sec = section(title);
+  if (!rows.length) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = "aucune donnée";
+    sec.appendChild(e);
+  } else {
+    const max = Math.max(...rows.map((r) => r.value));
+    rows.forEach((r) => renderBarRow(sec, r.label, r.value, max, r.format));
+  }
+  body.appendChild(sec);
+}
+
+async function load() {
+  const body = document.getElementById("body");
+  const live = document.getElementById("hLive");
+  live.textContent = "chargement…";
+  const data = await fetch(`${BACKEND}/api/analysis`).then((r) => r.json()).catch(() => null);
+  body.innerHTML = "";
+
+  if (!data || data.totalMessages === 0) {
+    body.innerHTML = '<div class="empty">aucune donnée (backend local injoignable ou base vide)</div>';
+    live.textContent = "indisponible";
+    return;
+  }
+  live.textContent = "à jour";
+
+  const nonNoise = data.totalMessages - data.totalNoise;
+
+  // --- tuiles KPI ---
+  const kpiRow = document.createElement("div");
+  kpiRow.className = "kpi-row";
+  const since = data.minReceivedAt ? new Date(data.minReceivedAt * 1000).toLocaleString() : "—";
+  kpiRow.append(
+    kpiTile(since, "enregistrement depuis"),
+    kpiTile(data.totalMessages, "messages stockés"),
+    kpiTile(`${data.totalNoise} (${pct(data.totalNoise, data.totalMessages)})`, "dont bruit"),
+    kpiTile(data.uniquePubkeys, "pubkeys uniques"),
+    kpiTile(data.uniqueNicknames, "pseudos uniques"),
+    kpiTile(pct(data.teleported.teleported, data.teleported.total), "messages téléportés"),
+  );
+  body.appendChild(kpiRow);
+
+  // --- top 20 pseudos ---
+  barSection(
+    "Top 20 pseudos",
+    data.topNicknames.map((r) => ({
+      label: r.nickname,
+      value: r.n,
+      format: (v) => `${v} (${pct(v, nonNoise)})`,
+    })),
+    body,
+  );
+
+  // --- messages par geohash ---
+  barSection(
+    "Messages par geohash (top 20)",
+    data.byGeohash.map((r) => ({
+      label: `#${r.geohash} — ${r.label}`,
+      value: r.n,
+      format: (v) => `${v} (${pct(v, nonNoise)})`,
+    })),
+    body,
+  );
+
+  // --- répartition par niveau de précision geohash ---
+  const precisionRows = Object.entries(data.byPrecision)
+    .sort((a, b) => b[1] - a[1])
+    .map(([label, n]) => ({ label, value: n, format: (v) => `${v} (${pct(v, nonNoise)})` }));
+  barSection("Répartition par précision geohash", precisionRows, body);
+
+  // --- activité par jour ---
+  // shortcut: barres horizontales (même composant que les classements) plutôt qu'un
+  // graphique temporel dédié -- la fenêtre est bornée par RETENTION_DAYS (+ messages
+  // "kept"), donc au plus quelques dizaines de jours, encore lisible ainsi. À revoir si
+  // cette liste s'allonge nettement.
+  barSection(
+    "Activité par jour",
+    data.byDay.map((r) => ({
+      label: r.day,
+      value: r.n,
+      format: (v) => `${v} (${pct(v, nonNoise)})`,
+    })),
+    body,
+  );
+
+  // --- pseudo perso vs auto vs vide ---
+  const k = data.nicknameKind;
+  barSection(
+    "Pseudo personnalisé vs généré par défaut",
+    [
+      { label: `perso (${k.persoNicknames} pseudos)`, value: k.perso, format: (v) => `${v} (${pct(v, nonNoise)})` },
+      { label: `auto "anonNNNN" (${k.autoNicknames} pseudos)`, value: k.auto, format: (v) => `${v} (${pct(v, nonNoise)})` },
+      { label: "pseudo vide", value: k.vide, format: (v) => `${v} (${pct(v, nonNoise)})` },
+    ],
+    body,
+  );
+}
+
+document.getElementById("refreshBtn").onclick = load;
+load();
+</script>
+</body>
+</html>

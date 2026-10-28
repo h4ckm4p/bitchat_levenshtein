@@ -156,6 +156,7 @@
     <button id="addBtn">+ Colonne</button>
     <button id="blurToggle" type="button">🙈 Flouter</button>
     <button id="keptToggle" type="button">⭐ Gardés</button>
+    <button id="analysisToggle" type="button">📊 Analyse</button>
     <div id="freshness" style="color:#8b98a5;font-size:12px;">aucun message reçu</div>
     <div id="nodeCount" style="color:#8b98a5;font-size:12px;">? nœuds connectés</div>
     <div id="status">connexion au backend local…</div>
@@ -461,6 +462,7 @@ document.getElementById("keptToggle").onclick = () => {
   if (panel.classList.contains("open")) loadKeptPanel();
 };
 document.getElementById("keptClose").onclick = () => document.getElementById("keptPanel").classList.remove("open");
+document.getElementById("analysisToggle").onclick = () => window.open("analysis.html", "_blank");
 
 // --- état des colonnes ---
 // shortcut: id stable par colonne (pas l'index dans le tableau) — permet d'ajouter/retirer

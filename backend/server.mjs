@@ -123,10 +123,20 @@ const recentStmt = db.prepare(`
 `);
 const countStmt = db.prepare(`SELECT COUNT(*) AS n FROM events`);
 const countNoiseStmt = db.prepare(`SELECT COUNT(*) AS n FROM events WHERE is_noise = 1`);
+// pas de LIMIT ici -- /api/analysis a besoin de TOUS les geohash distincts pour calculer
+// des pourcentages par niveau de précision justes, pas seulement les 50 premiers.
+// /api/stats (seul autre appelant) tronque lui-même à 50 après coup.
 const byGeohashStmt = db.prepare(`
   SELECT geohash, COUNT(*) AS n FROM events
   WHERE is_noise = 0 AND geohash IS NOT NULL
-  GROUP BY geohash ORDER BY n DESC LIMIT 50
+  GROUP BY geohash ORDER BY n DESC
+`);
+// une ligne par pseudo distinct (pas par message) -- sert à la fois au top 20 et au
+// classement perso/auto/vide, dans la même boucle (/api/analysis).
+const nicknameGroupsStmt = db.prepare(`
+  SELECT nickname, COUNT(*) AS n FROM events
+  WHERE is_noise = 0
+  GROUP BY nickname ORDER BY n DESC
 `);
 // export : tout l'historique non-bruit, filtré ensuite en JS par terme+distance (pas en SQL,
 // la distance de Levenshtein n'a pas d'équivalent simple en SQL -- cf. matches() plus bas)
@@ -401,7 +411,56 @@ const server = createServer((req, res) => {
       totalMessages: countStmt.get().n,
       totalNoise: countNoiseStmt.get().n,
       retentionDays: RETENTION_DAYS,
-      byGeohash: byGeohashStmt.all().map((r) => ({ ...r, label: describeGeohash(r.geohash) })),
+      byGeohash: byGeohashStmt.all().slice(0, 50).map((r) => ({ ...r, label: describeGeohash(r.geohash) })),
+    }));
+    return;
+  }
+  if (req.url === "/api/analysis") {
+    const minReceivedAt = db.prepare(`SELECT MIN(received_at) AS n FROM events`).get().n;
+    const geohashRows = byGeohashStmt.all();
+    const nickGroups = nicknameGroupsStmt.all();
+    const namedNickGroups = nickGroups.filter((r) => r.nickname);
+
+    // regex stricte : "anon" + chiffres uniquement = pseudo par défaut généré par bitchat
+    // (vérifié en direct sur la base réelle : anon1007, anon0092...) -- toute variante de
+    // casse ou texte additionnel (Anon56, AnonFrog, Anonymous) reste un choix personnalisé.
+    let autoMessages = 0, persoMessages = 0, emptyMessages = 0;
+    let autoNicknames = 0, persoNicknames = 0;
+    for (const r of nickGroups) {
+      if (!r.nickname) { emptyMessages += r.n; continue; }
+      if (/^anon\d+$/.test(r.nickname)) { autoMessages += r.n; autoNicknames++; }
+      else { persoMessages += r.n; persoNicknames++; }
+    }
+
+    const byDay = db.prepare(`
+      SELECT date(received_at, 'unixepoch') AS day, COUNT(*) AS n
+      FROM events WHERE is_noise = 0 GROUP BY day ORDER BY day ASC
+    `).all();
+
+    const byPrecision = {};
+    for (const r of geohashRows) {
+      const label = precisionLabel(r.geohash);
+      byPrecision[label] = (byPrecision[label] || 0) + r.n;
+    }
+
+    const teleport = db.prepare(`
+      SELECT COALESCE(SUM(teleported), 0) AS teleported, COUNT(*) AS total
+      FROM events WHERE is_noise = 0
+    `).get();
+
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      totalMessages: countStmt.get().n,
+      totalNoise: countNoiseStmt.get().n,
+      minReceivedAt, // epoch seconds, ou null si base vide
+      uniquePubkeys: db.prepare(`SELECT COUNT(DISTINCT pubkey) AS n FROM events WHERE is_noise = 0`).get().n,
+      uniqueNicknames: namedNickGroups.length,
+      topNicknames: namedNickGroups.slice(0, 20),
+      nicknameKind: { auto: autoMessages, perso: persoMessages, vide: emptyMessages, autoNicknames, persoNicknames },
+      byGeohash: geohashRows.slice(0, 20).map((r) => ({ ...r, label: describeGeohash(r.geohash) })),
+      byPrecision,
+      byDay,
+      teleported: teleport,
     }));
     return;
   }
