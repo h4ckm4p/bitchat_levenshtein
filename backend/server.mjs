@@ -448,6 +448,30 @@ const server = createServer((req, res) => {
       FROM events WHERE is_noise = 0
     `).get();
 
+    // heure UTC (received_at est un epoch UTC) -- agrégé sur toute la fenêtre retenue,
+    // pas par jour : montre le rythme d'activité sur 24h, pas son évolution dans le temps.
+    const hourMessages = db.prepare(`
+      SELECT CAST(strftime('%H', received_at, 'unixepoch') AS INTEGER) AS hour, COUNT(*) AS n
+      FROM events WHERE is_noise = 0 GROUP BY hour
+    `).all();
+    const hourPubkeys = db.prepare(`
+      SELECT CAST(strftime('%H', received_at, 'unixepoch') AS INTEGER) AS hour, COUNT(DISTINCT pubkey) AS n
+      FROM events WHERE is_noise = 0 GROUP BY hour
+    `).all();
+    // 24 entrées toujours présentes (zero-filled) -- une heure sans aucun message ne doit
+    // pas juste disparaître du graphe.
+    const byHour = Array.from({ length: 24 }, (_, h) => ({ hour: h, n: hourMessages.find((r) => r.hour === h)?.n || 0 }));
+    const byHourPubkeys = Array.from({ length: 24 }, (_, h) => ({ hour: h, n: hourPubkeys.find((r) => r.hour === h)?.n || 0 }));
+
+    // les 100 pubkeys les plus actifs : durée entre leur 1er et leur dernier message
+    // retenu -- borné par la fenêtre de rétention (purge RETENTION_DAYS), pas une vraie
+    // "durée de vie" de l'identité elle-même.
+    const pubkeyLifespan = db.prepare(`
+      SELECT pubkey, COUNT(*) AS n, MIN(received_at) AS firstSeen,
+             MAX(received_at) - MIN(received_at) AS lifespanSeconds
+      FROM events WHERE is_noise = 0 GROUP BY pubkey ORDER BY n DESC LIMIT 100
+    `).all();
+
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({
       totalMessages: countStmt.get().n,
@@ -460,6 +484,9 @@ const server = createServer((req, res) => {
       byGeohash: geohashRows.slice(0, 20).map((r) => ({ ...r, label: describeGeohash(r.geohash) })),
       byPrecision,
       byDay,
+      byHour,
+      byHourPubkeys,
+      pubkeyLifespan,
       teleported: teleport,
     }));
     return;
