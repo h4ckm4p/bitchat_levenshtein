@@ -448,20 +448,24 @@ const server = createServer((req, res) => {
       FROM events WHERE is_noise = 0
     `).get();
 
-    // heure UTC (received_at est un epoch UTC) -- agrégé sur toute la fenêtre retenue,
-    // pas par jour : montre le rythme d'activité sur 24h, pas son évolution dans le temps.
-    const hourMessages = db.prepare(`
-      SELECT CAST(strftime('%H', received_at, 'unixepoch') AS INTEGER) AS hour, COUNT(*) AS n
-      FROM events WHERE is_noise = 0 GROUP BY hour
-    `).all();
-    const hourPubkeys = db.prepare(`
-      SELECT CAST(strftime('%H', received_at, 'unixepoch') AS INTEGER) AS hour, COUNT(DISTINCT pubkey) AS n
-      FROM events WHERE is_noise = 0 GROUP BY hour
-    `).all();
-    // 24 entrées toujours présentes (zero-filled) -- une heure sans aucun message ne doit
-    // pas juste disparaître du graphe.
-    const byHour = Array.from({ length: 24 }, (_, h) => ({ hour: h, n: hourMessages.find((r) => r.hour === h)?.n || 0 }));
-    const byHourPubkeys = Array.from({ length: 24 }, (_, h) => ({ hour: h, n: hourPubkeys.find((r) => r.hour === h)?.n || 0 }));
+    // courbe chronologique (jour+heure en X, nb en Y), pas un profil 24h agrégé -- regroupe
+    // par tranche d'heure (epoch arrondi à l'heure, division entière) puis zero-fill les
+    // heures sans message pour que la courbe ne saute pas d'un point à l'autre.
+    function hourlySeries(countExpr) {
+      const rows = db.prepare(`
+        SELECT (received_at / 3600) * 3600 AS bucket, ${countExpr} AS n
+        FROM events WHERE is_noise = 0 GROUP BY bucket ORDER BY bucket ASC
+      `).all();
+      if (!rows.length) return [];
+      const byBucket = new Map(rows.map((r) => [r.bucket, r.n]));
+      const out = [];
+      for (let t = rows[0].bucket; t <= rows[rows.length - 1].bucket; t += 3600) {
+        out.push({ bucket: t, n: byBucket.get(t) || 0 });
+      }
+      return out;
+    }
+    const byHour = hourlySeries("COUNT(*)");
+    const byHourPubkeys = hourlySeries("COUNT(DISTINCT pubkey)");
 
     // les 100 pubkeys les plus actifs : durée entre leur 1er et leur dernier message
     // retenu -- borné par la fenêtre de rétention (purge RETENTION_DAYS), pas une vraie
@@ -472,6 +476,22 @@ const server = createServer((req, res) => {
       FROM events WHERE is_noise = 0 GROUP BY pubkey ORDER BY n DESC LIMIT 100
     `).all();
 
+    // pubkey représentatif de chaque pseudo (celui qui l'a le plus utilisé) -- permet au
+    // dashboard d'ouvrir author.html depuis le classement des pseudos, comme un clic sur un
+    // pseudo dans local.html/channel.html (un pseudo seul n'identifie personne, il faut un
+    // pubkey pour pointer vers "les messages de cet auteur").
+    const nickPubkeyRows = db.prepare(`
+      SELECT nickname, pubkey, COUNT(*) AS n FROM events
+      WHERE is_noise = 0 AND nickname IS NOT NULL AND nickname != ''
+      GROUP BY nickname, pubkey ORDER BY nickname, n DESC
+    `).all();
+    const topPubkeyByNickname = new Map();
+    for (const r of nickPubkeyRows) {
+      if (!topPubkeyByNickname.has(r.nickname)) topPubkeyByNickname.set(r.nickname, r.pubkey);
+    }
+    const topNicknames = namedNickGroups.slice(0, 20)
+      .map((r) => ({ ...r, pubkey: topPubkeyByNickname.get(r.nickname) || null }));
+
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({
       totalMessages: countStmt.get().n,
@@ -479,7 +499,7 @@ const server = createServer((req, res) => {
       minReceivedAt, // epoch seconds, ou null si base vide
       uniquePubkeys: db.prepare(`SELECT COUNT(DISTINCT pubkey) AS n FROM events WHERE is_noise = 0`).get().n,
       uniqueNicknames: namedNickGroups.length,
-      topNicknames: namedNickGroups.slice(0, 20),
+      topNicknames,
       nicknameKind: { auto: autoMessages, perso: persoMessages, vide: emptyMessages, autoNicknames, persoNicknames },
       byGeohash: geohashRows.slice(0, 20).map((r) => ({ ...r, label: describeGeohash(r.geohash) })),
       byPrecision,

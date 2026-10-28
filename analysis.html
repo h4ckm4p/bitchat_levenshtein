@@ -44,6 +44,8 @@
   }
   .bar-fill { height: 100%; background: #1d9bf0; }
   .bar-value { width: 90px; flex-shrink: 0; text-align: right; color: #8b98a5; }
+  .bar-row.clickable { cursor: pointer; }
+  .bar-row.clickable:hover .bar-label { color: #1d9bf0; }
   .empty { color: #5b6672; padding: 40px; text-align: center; }
   .pie-wrap { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
   .pie { width: 140px; height: 140px; border-radius: 50%; flex-shrink: 0; }
@@ -58,8 +60,11 @@
   .scatter-axis { fill: none; stroke: #2a2e33; stroke-width: 1; }
   .scatter-tick { fill: #8b98a5; font-size: 10px; }
   .scatter-axis-title { fill: #8b98a5; font-size: 11px; }
-  .scatter-point { fill: #1d9bf0; fill-opacity: .6; }
+  .scatter-point { fill: #1d9bf0; fill-opacity: .6; cursor: pointer; }
   .scatter-point:hover { fill-opacity: 1; }
+  .line-path { fill: none; stroke: #1d9bf0; stroke-width: 1.5; }
+  .line-point { fill: #1d9bf0; fill-opacity: 0; }
+  .line-point:hover { fill-opacity: 1; }
 </style>
 </head>
 <body>
@@ -81,10 +86,12 @@ function pct(n, total) {
 }
 
 // une ligne label + barre proportionnelle + valeur exacte -- graphique et donnée tabulaire
-// dans un seul composant, réutilisé pour tous les classements de cette page.
-function renderBarRow(container, label, value, maxValue, formatValue) {
+// dans un seul composant, réutilisé pour tous les classements de cette page. onClick
+// optionnel (pseudo/pubkey) : ouvre la page des messages de cette identité, comme un clic
+// sur un pseudo dans local.html/channel.html.
+function renderBarRow(container, label, value, maxValue, formatValue, onClick) {
   const row = document.createElement("div");
-  row.className = "bar-row";
+  row.className = "bar-row" + (onClick ? " clickable" : "");
   const labelEl = document.createElement("span");
   labelEl.className = "bar-label";
   labelEl.textContent = label;
@@ -99,6 +106,7 @@ function renderBarRow(container, label, value, maxValue, formatValue) {
   valueEl.className = "bar-value";
   valueEl.textContent = formatValue ? formatValue(value) : String(value);
   row.append(labelEl, track, valueEl);
+  if (onClick) row.onclick = onClick;
   container.appendChild(row);
 }
 
@@ -128,7 +136,7 @@ function barSection(title, rows, body) {
     sec.appendChild(e);
   } else {
     const max = Math.max(...rows.map((r) => r.value));
-    rows.forEach((r) => renderBarRow(sec, r.label, r.value, max, r.format));
+    rows.forEach((r) => renderBarRow(sec, r.label, r.value, max, r.format, r.onClick));
   }
   body.appendChild(sec);
 }
@@ -170,8 +178,8 @@ function renderPieChart(container, segments) {
 }
 
 // nuage de points SVG (pas de lib) -- axes, graduations, un point par entrée, tooltip au
-// survol via <title> natif.
-function renderScatter(container, points, { xValue, yValue, xLabel, yLabel, tooltip }) {
+// survol via <title> natif, clic optionnel (ouvrir la page de l'entité pointée).
+function renderScatter(container, points, { xValue, yValue, xLabel, yLabel, tooltip, onClick }) {
   const width = 860, height = 320;
   const padL = 55, padB = 36, padT = 10, padR = 10;
   const plotW = width - padL - padR, plotH = height - padT - padB;
@@ -228,10 +236,97 @@ function renderScatter(container, points, { xValue, yValue, xLabel, yLabel, tool
       t.textContent = tooltip(p);
       c.appendChild(t);
     }
+    if (onClick) c.onclick = () => onClick(p);
     svg.appendChild(c);
   });
 
   container.appendChild(svg);
+}
+
+// courbe chronologique SVG (pas de lib) -- ligne + points discrets (hover-only) avec
+// tooltip, graduations X éparses (points potentiellement nombreux sur toute la fenêtre
+// retenue -- jusqu'à ~720 pour 30 jours en heures).
+function renderLineChart(container, points, { xValue, yValue, xTickLabel, xLabel, yLabel, tooltip }) {
+  const width = 860, height = 320;
+  const padL = 55, padB = 36, padT = 10, padR = 10;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const xs = points.map(xValue);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const yMax = Math.max(1, ...points.map(yValue));
+  const sx = (v) => padL + (xMax > xMin ? ((v - xMin) / (xMax - xMin)) * plotW : plotW / 2);
+  const sy = (v) => padT + plotH - (v / yMax) * plotH;
+
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("class", "scatter");
+
+  const axis = document.createElementNS(NS, "path");
+  axis.setAttribute("d", `M${padL} ${padT} V${padT + plotH} H${padL + plotW}`);
+  axis.setAttribute("class", "scatter-axis");
+  svg.appendChild(axis);
+
+  for (let i = 0; i <= 4; i++) {
+    const yv = (yMax / 4) * i;
+    const yt = document.createElementNS(NS, "text");
+    yt.setAttribute("x", padL - 8); yt.setAttribute("y", sy(yv) + 4);
+    yt.setAttribute("text-anchor", "end"); yt.setAttribute("class", "scatter-tick");
+    yt.textContent = Math.round(yv);
+    svg.appendChild(yt);
+  }
+  const tickCount = Math.min(6, points.length);
+  for (let i = 0; i < tickCount; i++) {
+    const idx = Math.round((i / Math.max(1, tickCount - 1)) * (points.length - 1));
+    const p = points[idx];
+    const xt = document.createElementNS(NS, "text");
+    xt.setAttribute("x", sx(xValue(p))); xt.setAttribute("y", padT + plotH + 16);
+    xt.setAttribute("text-anchor", "middle"); xt.setAttribute("class", "scatter-tick");
+    xt.textContent = xTickLabel(p);
+    svg.appendChild(xt);
+  }
+
+  const xTitle = document.createElementNS(NS, "text");
+  xTitle.setAttribute("x", padL + plotW / 2); xTitle.setAttribute("y", height - 4);
+  xTitle.setAttribute("text-anchor", "middle"); xTitle.setAttribute("class", "scatter-axis-title");
+  xTitle.textContent = xLabel;
+  svg.appendChild(xTitle);
+
+  const yTitle = document.createElementNS(NS, "text");
+  yTitle.setAttribute("x", -(padT + plotH / 2)); yTitle.setAttribute("y", 14);
+  yTitle.setAttribute("transform", "rotate(-90)");
+  yTitle.setAttribute("text-anchor", "middle"); yTitle.setAttribute("class", "scatter-axis-title");
+  yTitle.textContent = yLabel;
+  svg.appendChild(yTitle);
+
+  const d = points.map((p, i) => `${i === 0 ? "M" : "L"}${sx(xValue(p))} ${sy(yValue(p))}`).join(" ");
+  const line = document.createElementNS(NS, "path");
+  line.setAttribute("d", d);
+  line.setAttribute("class", "line-path");
+  svg.appendChild(line);
+
+  points.forEach((p) => {
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("cx", sx(xValue(p)));
+    c.setAttribute("cy", sy(yValue(p)));
+    c.setAttribute("r", 3);
+    c.setAttribute("class", "line-point");
+    if (tooltip) {
+      const t = document.createElementNS(NS, "title");
+      t.textContent = tooltip(p);
+      c.appendChild(t);
+    }
+    svg.appendChild(c);
+  });
+
+  container.appendChild(svg);
+}
+
+function hourLabel(epochBucket) {
+  const d = new Date(epochBucket * 1000);
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const hour = String(d.getHours()).padStart(2, "0");
+  return `${day}/${month} ${hour}h`;
 }
 
 async function load() {
@@ -264,13 +359,16 @@ async function load() {
   );
   body.appendChild(kpiRow);
 
-  // --- top 20 pseudos ---
+  // --- top 20 pseudos (clic -> author.html, comme un clic sur un pseudo dans local.html) ---
   barSection(
     "Top 20 pseudos",
     data.topNicknames.map((r) => ({
       label: r.nickname,
       value: r.n,
       format: (v) => `${v} (${pct(v, nonNoise)})`,
+      onClick: r.pubkey
+        ? () => window.open(`author.html?pubkey=${encodeURIComponent(r.pubkey)}&nick=${encodeURIComponent(r.nickname)}`, "_blank")
+        : null,
     })),
     body,
   );
@@ -317,27 +415,42 @@ async function load() {
   ]);
   body.appendChild(pieSec);
 
-  // --- activité par heure de la journée (UTC, agrégée sur toute la fenêtre retenue) ---
-  barSection(
-    "Messages par heure (UTC)",
-    data.byHour.map((r) => ({
-      label: `${String(r.hour).padStart(2, "0")}h`,
-      value: r.n,
-      format: (v) => `${v} (${pct(v, nonNoise)})`,
-    })),
-    body,
-  );
-  barSection(
-    "Pubkeys actifs par heure (UTC)",
-    data.byHourPubkeys.map((r) => ({
-      label: `${String(r.hour).padStart(2, "0")}h`,
-      value: r.n,
-      format: (v) => `${v} (${pct(v, data.uniquePubkeys)})`,
-    })),
-    body,
-  );
+  // --- activité par heure, courbe chronologique (jour+heure en X, nb en Y) ---
+  const hourSec = section("Messages par heure");
+  if (!data.byHour.length) {
+    const e = document.createElement("div"); e.className = "empty"; e.textContent = "aucune donnée";
+    hourSec.appendChild(e);
+  } else {
+    renderLineChart(hourSec, data.byHour, {
+      xValue: (p) => p.bucket,
+      yValue: (p) => p.n,
+      xTickLabel: (p) => hourLabel(p.bucket),
+      xLabel: "Jour / heure",
+      yLabel: "Messages",
+      tooltip: (p) => `${hourLabel(p.bucket)} — ${p.n} messages`,
+    });
+  }
+  body.appendChild(hourSec);
+
+  const hourPkSec = section("Pubkeys actifs par heure");
+  if (!data.byHourPubkeys.length) {
+    const e = document.createElement("div"); e.className = "empty"; e.textContent = "aucune donnée";
+    hourPkSec.appendChild(e);
+  } else {
+    renderLineChart(hourPkSec, data.byHourPubkeys, {
+      xValue: (p) => p.bucket,
+      yValue: (p) => p.n,
+      xTickLabel: (p) => hourLabel(p.bucket),
+      xLabel: "Jour / heure",
+      yLabel: "Pubkeys actifs",
+      tooltip: (p) => `${hourLabel(p.bucket)} — ${p.n} pubkeys actifs`,
+    });
+  }
+  body.appendChild(hourPkSec);
 
   // --- durée de vie des pubkeys (top 100 par nombre de messages), nuage de points ---
+  // clic -> author.html (comme un clic sur un message/pseudo dans local.html), survol ->
+  // pubkey complet + stats.
   const scatterSec = section("Durée de vie des pubkeys (top 100 par nombre de messages)");
   if (!data.pubkeyLifespan.length) {
     const e = document.createElement("div");
@@ -350,7 +463,8 @@ async function load() {
       yValue: (p) => p.lifespanSeconds / 86400,
       xLabel: "Nombre de messages",
       yLabel: "Durée de vie (jours, entre 1er et dernier message retenu)",
-      tooltip: (p) => `${p.pubkey.slice(0, 8)}… — ${p.n} messages, ${(p.lifespanSeconds / 86400).toFixed(1)}j`,
+      tooltip: (p) => `${p.pubkey}\n${p.n} messages — ${(p.lifespanSeconds / 86400).toFixed(1)}j`,
+      onClick: (p) => window.open(`author.html?pubkey=${encodeURIComponent(p.pubkey)}`, "_blank"),
     });
   }
   body.appendChild(scatterSec);
